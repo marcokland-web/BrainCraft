@@ -29,6 +29,8 @@ export async function rpc<T>(fn: string, args: Record<string, unknown>): Promise
   if (!res.ok) {
     // Eigene Codes der bc_*-Funktionen kommen mit Status 400; ab 500 ist es immer ein Serverfehler (Bodo)
     const msg = typeof data?.message === 'string' ? data.message : ''
+    // Funktion gibt es auf dem Server (noch) nicht, z. B. Migration nicht eingespielt
+    if (res.status === 404 && data?.code === 'PGRST202') throw new ApiError('missing_function')
     const own = res.status < 500 && /^[a-z_]{3,40}( \d{1,3})?$/.test(msg)
     throw new ApiError(own ? msg : 'server_error')
   }

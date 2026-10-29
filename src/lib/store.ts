@@ -424,6 +424,24 @@ export async function parentAnswer(a: { answerId: string; profileId: string; que
   return r.stars_booked ?? 0
 }
 
+// Klassenarbeit löschen: Lernfolien, Fragen, Lernstand und Antworten dazu löscht der Server mit;
+// verdiente Sterne und Ausrüstungsteile bleiben
+export async function deleteExam(id: string) {
+  await parentRpc('bc_exam_delete', { p_id: id })
+  await refresh()
+}
+
+// Sterne und Fortschritt zurücksetzen (ein Kind oder null = alle). Braucht zusätzlich die PIN.
+// Wartende Antworten der betroffenen Kinder werden verworfen, sonst käme alter Fortschritt zurück.
+export async function resetProgress(pin: string, profileId: string | null) {
+  const r = await parentRpc<{ ok: boolean; error?: string; locked_until?: string }>('bc_progress_reset', { p_pin: pin, p_profile_id: profileId })
+  if (r.ok) {
+    set({ queue: state.queue.filter((q) => profileId !== null && q.profileId !== profileId) })
+    await refresh()
+  }
+  return r
+}
+
 // ---------- Abgeleitete Werte ----------
 
 export function currentProfile(s: State) {

@@ -381,3 +381,11 @@ dialog.confirm .st-grab{display:none}
 .parents .quiz-card .a-say svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .parents .quiz-card .a-say.on{background:var(--accent);color:var(--on-accent)}
 .parents .quiz-card .a-ask{display:flex;align-items:flex-start;gap:12px}
+
+/* Verwalten: Klassenarbeiten löschen, Zurücksetzen */
+.parents .manage-exams{padding:4px 16px}
+.parents .manage-exams li:first-child{border-top:0}
+.parents .manage-notice{margin:0 4px 8px}
+.parents .manage-reset{display:grid;gap:14px}
+.parents .manage-reset > p{margin:0}
+.parents .manage-reset .field input{letter-spacing:.3em}

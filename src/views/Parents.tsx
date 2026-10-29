@@ -13,6 +13,7 @@ import {
   useStore,
   type QuestionRow,
 } from '../lib/store'
+import { Manage } from './Manage'
 import { ShopManager } from './ShopManager'
 import { resetTogether, Together, togetherRunning } from './Together'
 
@@ -223,6 +224,8 @@ export function Parents({ onClose }: { onClose: () => void }) {
       </div>
 
       <ShopManager />
+
+      <Manage />
 
       <div>
         <p className="kicker">{t.scanTitle}</p>
