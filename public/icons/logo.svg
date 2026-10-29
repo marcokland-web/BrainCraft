@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg-braincraft-rund" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8C2545"/>
+      <stop offset="1" stop-color="#5A1028"/>
+    </linearGradient>
+    <linearGradient id="gold-braincraft-rund" x1="0" y1="212" x2="0" y2="812" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0D08A"/>
+      <stop offset="1" stop-color="#C8963E"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230" fill="url(#bg-braincraft-rund)"/>
+  <g fill="none" stroke="url(#gold-braincraft-rund)" stroke-width="62" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M410.0,440.0 L579.7,538.0 L579.7,734.0 L410.0,832.0 L240.3,734.0 L240.3,538.0 Z"/>
+    <path d="M240.3,538.0 L410.0,636.0 L579.7,538.0 M410.0,636.0 L410.0,832.0"/>
+    <path d="M410 348 C418 280 520 228 616 232"/>
+  </g>
+  <path d="M722,142 Q722,236 816,236 Q722,236 722,330 Q722,236 628,236 Q722,236 722,142 Z" fill="url(#gold-braincraft-rund)" stroke="url(#gold-braincraft-rund)" stroke-width="24" stroke-linejoin="round"/>
+</svg>

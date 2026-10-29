@@ -1,0 +1,184 @@
+/* Game Arena und Minispiele (Kinder-Stil: gerundete Systemschrift, Tasten mindestens 60 px).
+   Farben nur über Tokens; Gold für Sterne, Grün für „richtig“, Rot nur mit freundlichem Text. */
+
+.arena{display:grid;gap:14px;max-width:760px;width:100%;margin:0 auto;padding-top:calc(env(safe-area-inset-top,0px) + 4px)}
+.arena .a-top{display:flex;align-items:center;gap:12px;min-height:56px}
+.arena .x{all:unset;cursor:pointer;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;color:var(--fg);flex:none}
+.arena .x svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round}
+.arena .x:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.arena .a-bar{flex:1;height:12px;border-radius:99px;background:var(--fill);overflow:hidden}
+.arena .a-bar > i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--gold),color-mix(in srgb,var(--gold) 70%,var(--accent)));transition:width .5s ease}
+.arena .a-count{font:700 17px/1 var(--f-round);color:var(--muted);min-width:44px;text-align:right}
+.arena .a-card{display:grid;gap:16px;padding:22px}
+.arena .a-card .kicker{margin:0}
+.arena .a-prompt{font:700 26px/1.25 var(--f-round);margin:0}
+.arena .a-foot{display:grid;gap:12px;min-height:60px}
+.arena .a-msg{margin:0;padding:14px 16px;border-radius:var(--r-l);font:600 18px/1.35 var(--f-round);display:grid;gap:4px}
+.arena .a-msg small{font:500 15px/1.3 var(--f-body);color:var(--muted)}
+.arena .a-msg.ok{background:var(--ok-tint);color:var(--ok)}
+.arena .a-msg.hint{background:var(--gold-tint);color:var(--gold-ink)}
+.arena .a-msg.pit{background:var(--tint);color:var(--fg)}
+.arena .a-next{min-height:60px;font-size:19px}
+.arena .a-note{margin:0;padding:10px 14px;border-radius:var(--r-m);background:var(--fill);color:var(--muted);font-size:15px}
+
+/* Fortschritt in 5-%-Schritten (keine Inline-Styles wegen CSP) */
+.arena .a-bar > i.w1{width:5%}.arena .a-bar > i.w2{width:10%}.arena .a-bar > i.w3{width:15%}.arena .a-bar > i.w4{width:20%}
+.arena .a-bar > i.w5{width:25%}.arena .a-bar > i.w6{width:30%}.arena .a-bar > i.w7{width:35%}.arena .a-bar > i.w8{width:40%}
+.arena .a-bar > i.w9{width:45%}.arena .a-bar > i.w10{width:50%}.arena .a-bar > i.w11{width:55%}.arena .a-bar > i.w12{width:60%}
+.arena .a-bar > i.w13{width:65%}.arena .a-bar > i.w14{width:70%}.arena .a-bar > i.w15{width:75%}.arena .a-bar > i.w16{width:80%}
+.arena .a-bar > i.w17{width:85%}.arena .a-bar > i.w18{width:90%}.arena .a-bar > i.w19{width:95%}.arena .a-bar > i.w20{width:100%}
+
+/* Wackeln nach einem Fehler (zwei Klassen, damit es jedes Mal neu startet) */
+/* Zwei gleiche Keyframes mit verschiedenen Namen, sonst startet die Animation beim nächsten Fehler nicht neu */
+@keyframes bc-shake-a{0%,100%{transform:none}20%{transform:translateX(-8px)}40%{transform:translateX(7px)}60%{transform:translateX(-5px)}80%{transform:translateX(3px)}}
+@keyframes bc-shake-b{0%,100%{transform:none}20%{transform:translateX(-8px)}40%{transform:translateX(7px)}60%{transform:translateX(-5px)}80%{transform:translateX(3px)}}
+.arena .shake-a{animation:bc-shake-a .45s ease}
+.arena .shake-b{animation:bc-shake-b .45s ease}
+
+/* Bausteine der Spiele */
+.arena .g-stack{display:grid;gap:14px}
+.arena .g-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.arena .g-choices.one{grid-template-columns:minmax(0,1fr)}
+@media (max-width:520px){.arena .g-choices{grid-template-columns:minmax(0,1fr)}}
+.arena .g-btn{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;min-height:64px;padding:12px 16px;
+  border-radius:var(--r-l);background:var(--key);border:2px solid var(--line);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-shine);
+  font:600 19px/1.25 var(--f-round);color:var(--fg);text-align:center;transition:transform .12s ease,background .2s ease,border-color .2s ease}
+.arena .g-btn.left{justify-content:flex-start;text-align:left}
+.arena .g-btn:active{transform:scale(.97)}
+.arena .g-btn:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.arena .g-btn[disabled]{cursor:default}
+.arena .g-btn.sel{border-color:var(--accent);background:var(--tint)}
+.arena .g-btn.ok{border-color:var(--ok);background:var(--ok-tint);color:var(--ok)}
+.arena .g-btn.no{opacity:.45;text-decoration:line-through}
+.arena .g-btn.cleared{color:var(--muted)}
+.arena .g-btn.chip{min-height:60px;padding:10px 18px;border-radius:99px}
+.arena .g-tag{font:600 13px/1 var(--f-body);color:var(--ok);background:var(--ok-tint);border-radius:99px;padding:4px 8px;flex:none}
+.arena .g-chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+.arena .g-hint{margin:0;text-align:center;color:var(--muted);font-size:15px}
+.arena .g-sentence{margin:0;font:600 22px/1.6 var(--f-round)}
+.arena .g-gap{display:inline-block;min-width:110px;padding:0 10px;margin:0 4px;border-bottom:3px dashed var(--accent);text-align:center;color:var(--muted)}
+.arena .g-gap.filled{border-bottom:3px solid var(--ok);color:var(--ok)}
+.arena .g-reveal{margin:0;padding:12px 14px;border-radius:var(--r-m);background:var(--ok-tint);color:var(--fg);font:500 17px/1.4 var(--f-body)}
+.arena .g-rule{margin:0;text-align:center;font:700 18px/1.3 var(--f-round);color:var(--gold-ink)}
+
+/* Sortier-Kisten */
+.arena .g-boxes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.arena .g-box{all:unset;box-sizing:border-box;cursor:pointer;display:grid;align-content:start;gap:8px;min-height:140px;padding:12px;border-radius:var(--r-l);
+  border:2px dashed var(--line);background:var(--fill);text-align:center}
+.arena .g-box b{font:700 18px/1.2 var(--f-round)}
+.arena .g-box.ready{border-color:var(--accent);background:var(--tint)}
+.arena .g-box[disabled]{cursor:default}
+.arena .g-box:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.arena .g-inbox{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.arena .g-inbox i{font:600 15px/1 var(--f-round);font-style:normal;padding:8px 10px;border-radius:99px;background:var(--surface);color:var(--ok)}
+
+/* Blasen (schweben sanft, kein Zeitdruck) */
+.arena .g-bubbles{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;padding:6px 0}
+@keyframes bc-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.arena .g-bubble{all:unset;box-sizing:border-box;cursor:pointer;width:112px;height:112px;border-radius:50%;display:grid;place-items:center;padding:10px;text-align:center;
+  font:700 17px/1.15 var(--f-round);color:var(--fg);background:radial-gradient(circle at 30% 28%,var(--glass-shine),transparent 34%),var(--tint);
+  border:2px solid color-mix(in srgb,var(--accent) 35%,transparent);animation:bc-float 3.2s ease-in-out infinite;transition:transform .2s ease,opacity .2s ease}
+.arena .g-bubble.d1{animation-delay:-.8s}.arena .g-bubble.d2{animation-delay:-1.6s}.arena .g-bubble.d3{animation-delay:-2.4s}
+/* Lange Wörter (Wasserdampf) in der Blase trennen statt überlaufen */
+.arena .g-bubble{-webkit-hyphens:auto;hyphens:auto;overflow-wrap:anywhere}
+.arena .g-bubble:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.arena .g-bubble.popped{animation:none;transform:scale(.2);opacity:0;pointer-events:none}
+.arena .g-bubble.no{opacity:.4;animation:none}
+
+/* Paare */
+.arena .g-pairs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.arena .g-col{display:grid;gap:10px;align-content:start}
+/* m1 nicht gold, damit ein selbst gefundenes Paar nicht wie eine aufgedeckte Lösung aussieht */
+.arena .g-btn.ok.m1{border-color:var(--choco-hi);background:var(--fill);color:var(--fg)}
+.arena .g-btn.ok.m2{border-color:var(--accent);background:var(--tint);color:var(--accent)}
+.arena .g-btn.ok.m3{border-color:var(--muted);background:var(--fill);color:var(--fg)}
+
+/* Reihenfolge */
+.arena .g-order{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.arena .g-order li{display:flex;align-items:center;gap:12px;min-height:52px;padding:8px 12px;border-radius:var(--r-m);border:2px dashed var(--line);color:var(--muted);font:600 17px/1.3 var(--f-round)}
+.arena .g-order li.ok{border-style:solid;border-color:var(--ok);background:var(--ok-tint);color:var(--fg)}
+.arena .g-order .num{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--surface);font-weight:700;flex:none}
+
+/* Schatzkiste am Rundenende */
+.arena .a-end{display:grid;justify-items:center;gap:10px;text-align:center;padding:28px 22px}
+.arena .a-title{font:700 28px/1.2 var(--f-round);margin:0}
+.arena .a-stars{display:flex;align-items:center;gap:8px;margin:0;font:700 22px/1 var(--f-round);color:var(--gold-ink)}
+.arena .a-stars .st-ico{width:28px;height:28px}
+.arena .a-acts{display:grid;gap:8px;width:100%;max-width:360px;margin-top:8px}
+.arena .a-acts .btn{min-height:60px}
+.arena .a-chest{position:relative;width:150px;height:126px}
+.arena .a-chest > svg:not(.a-star){width:150px;height:126px;overflow:visible}
+.arena .a-chest .box{fill:var(--gold-tint);stroke:var(--gold);stroke-width:4}
+.arena .a-chest .lid{fill:var(--gold-tint);stroke:var(--gold);stroke-width:4;transform-origin:14px 44px;animation:bc-lid .9s .2s ease forwards}
+.arena .a-chest .lock{fill:var(--gold)}
+@keyframes bc-lid{to{transform:rotate(-24deg) translateY(-6px)}}
+.arena .a-star{position:absolute;width:30px;height:30px;fill:var(--gold);left:60px;top:28px;opacity:0;animation:bc-rise 1.2s .5s ease forwards}
+.arena .a-star.s2{left:30px;animation-delay:.7s}
+.arena .a-star.s3{left:92px;animation-delay:.9s}
+@keyframes bc-rise{0%{opacity:0;transform:translateY(10px) scale(.5)}40%{opacity:1}100%{opacity:1;transform:translateY(-44px) scale(1)}}
+
+@media (prefers-reduced-motion:reduce){
+  .arena .g-bubble,.arena .shake-a,.arena .shake-b{animation:none}
+  .arena .a-chest .lid{animation:none;transform:rotate(-24deg) translateY(-6px)}
+  .arena .a-star{animation:none;opacity:1;transform:translateY(-44px)}
+}
+
+/* Falscher Teil leuchtet kurz auf; aufgedeckte Lösung (shown) neutral, eigene richtige Teile grün (ok/mine) */
+@keyframes bc-flash{0%,100%{box-shadow:var(--shadow)}30%{box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 55%,transparent)}}
+.arena .flash{animation:bc-flash 1s ease;border-color:var(--bad)}
+.arena .g-btn.shown{border-color:var(--gold-ink);background:var(--gold-tint);color:var(--fg);border-style:dashed}
+.arena .g-gap.shown{border-bottom:3px dashed var(--gold-ink);color:var(--fg)}
+.arena .g-order li.shown{border-style:dashed;border-color:var(--gold-ink);background:var(--gold-tint);color:var(--fg)}
+.arena .g-inbox i.shown{color:var(--fg);outline:2px dashed var(--gold-ink);outline-offset:-2px}
+.arena .g-inbox i.mine{color:var(--ok)}
+.arena .g-bubble.ok{animation:none;border-color:var(--ok);background:var(--ok-tint);color:var(--ok)}
+.arena .g-bubble.shown{animation:none;border:2px dashed var(--gold-ink);background:var(--gold-tint)}
+.arena .g-bubble.faded{animation:none;opacity:.35}
+.arena .a-effort{margin:0;font:600 17px/1.35 var(--f-round)}
+@media (prefers-reduced-motion:reduce){.arena .flash{animation:none}}
+/* Aufgedeckte Paare: ein gemeinsames Raster, Zeilen gleich hoch */
+.arena .g-pairs.rows{grid-auto-rows:minmax(64px,auto);align-items:stretch}
+.arena .g-pairs.rows .g-btn{cursor:default}
+
+/* Vorlesen an der Frage und Spickzettel (Lernfolie zur Frage) */
+.arena .a-ask{display:flex;align-items:flex-start;gap:12px}
+.arena .a-ask .a-prompt{flex:1;min-width:0}
+.arena .a-say{all:unset;box-sizing:border-box;cursor:pointer;flex:none;width:52px;height:52px;border-radius:50%;display:grid;place-items:center;position:relative;background:var(--tint);color:var(--accent)}
+/* Knopf mittig zur ersten Zeile der Frage (Zeile 26 px × 1,25 = 32,5 px, Knopf 52 px) */
+.arena .a-ask .a-say{margin-top:calc((26px * 1.25 - 52px) / 2)}
+.arena .a-say::after{content:"";position:absolute;inset:-4px}
+.arena .a-say svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.arena .a-say.on{background:var(--accent);color:var(--on-accent)}
+.arena .a-say:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.arena .a-cheat{min-height:60px}
+.arena .a-foot .btn.tinted{background:var(--tint);border-color:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
+.arena .a-cheatsheet{display:grid;gap:10px}
+.arena .a-cheatsheet .kicker{margin:0}
+.arena .a-cheatsheet h2{font:700 24px/1.2 var(--f-round)}
+.arena .a-cheatsheet > p:not(.kicker){margin:0 0 6px;font:500 20px/1.5 var(--f-round)}
+.arena .a-cheatsheet b{font-weight:800;color:var(--accent)}
+.arena .a-cheatsheet .btn{min-height:60px}
+
+/* Boss-Kampf gegen den Blockwächter */
+.boss .boss-hp{flex:1;display:grid;grid-template-columns:repeat(10,1fr);gap:4px}
+.boss .boss-hp i{height:14px;border-radius:4px;background:var(--fill);transition:background .3s ease}
+.boss .boss-hp i.on{background:var(--accent)}
+.boss .boss-stage{display:grid;grid-template-columns:minmax(96px,150px) 1fr;align-items:center;gap:14px}
+.boss .boss-stage svg{width:100%;height:auto;display:block}
+.boss .boss-say{position:relative;margin:0;padding:12px 16px;border-radius:var(--r-l);font:600 17px/1.35 var(--f-round)}
+.boss .bg-block{transition:opacity .35s ease,transform .35s ease;transform-box:fill-box;transform-origin:center}
+.boss .bg-out{opacity:.7}
+@media (max-width:420px){.boss .boss-stage{grid-template-columns:96px 1fr}.boss .boss-say{font-size:16px}}
+.boss .boss-end svg{width:150px;height:auto;margin:0 auto;display:block}
+.boss .boss-prize{width:96px;height:96px;margin:4px auto 0;border-radius:24px;display:grid;place-items:center;background:var(--gold-tint);color:var(--gold-ink)}
+.boss .boss-prize svg{width:60px;height:60px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+/* Sprechblasen-Pfeil zur Figur (Glas wie die Blase, Rand nur auf den zwei äußeren Kanten) */
+.boss .boss-say::before{content:"";position:absolute;left:-7px;top:50%;width:12px;height:12px;margin-top:-6px;transform:rotate(45deg);
+  background:var(--glass-strong);border:1px solid var(--glass-edge);border-top-color:transparent;border-right-color:transparent;border-radius:0 0 0 3px}
+@media (prefers-reduced-transparency:reduce){.boss .boss-say::before{background:var(--surface)}}
+@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){.boss .boss-say::before{background:var(--surface)}}
+/* Wolke: Grundfläche über Token, damit sie im Dunkeln mit jedem Treffer heller wird statt zu verschwinden */
+.bg-cloud{--surface:var(--bc-cloud)}
+/* Sieg: zweizeiliger Preis-Text – Stern bleibt am Text statt links abgesetzt */
+.boss .boss-end .a-stars{display:block;text-align:center;line-height:1.3;max-width:520px}
+.boss .boss-end .a-stars .st-ico{display:inline-block;vertical-align:-5px;margin-right:6px}

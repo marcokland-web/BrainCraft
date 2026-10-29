@@ -1,0 +1,2 @@
+// Thema und Sprache vor dem ersten Zeichnen setzen (kein Aufblitzen), wie in Rechenstern
+(function(){var r=document.documentElement;try{var t=localStorage.getItem("studio-theme");if(t==="light"||t==="dark"){r.setAttribute("data-theme",t);var c=t==="dark"?"#141012":"#FAF7F2";document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute("content",c)})}if(localStorage.getItem("studio-lang")==="en")r.lang="en";}catch(e){}})();
