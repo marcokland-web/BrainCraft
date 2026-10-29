@@ -76,3 +76,8 @@
 - Gemeinsam-Abfragen ändert den Lernstand wie das Üben (Server-Verhalten von bc_answer mode 'eltern').
 - Tagesgrenze 40 Sterne wird vom Server erzwungen (Migration 005; Boss-Bonus ausgenommen).
 - Boss nach dem Sieg erneut spielbar, aber ohne Belohnung (Sterne und Teil nur beim ersten Sieg).
+
+## 29.10.2026 – Veröffentlicht, Gemeinsam-Abfragen
+- BrainCraft ist live unter https://marcokland-web.github.io/BrainCraft/ (Repository marcokland-web/BrainCraft, GitHub Actions → Pages). Migration 005 eingespielt (geprüft 29.10.).
+- Gemeinsam-Abfragen im Eltern-Cockpit: Kind und Arbeit (oder „Alles, was fällig ist“) wählen, Runde über buildRound (Vorabend wie Chill), mündliche Fassung je Spielform, Lösung zuerst verdeckt, „Gewusst (+1 Stern)“ / „Nochmal üben“ (nicht rot). Antworten direkt mit Eltern-Token (mode 'eltern'), feste Antwort-ID je Frage; Runde nur im Speicher, nach PIN weiter bei derselben Frage, beim Sperren/Verlassen verworfen. Während der Runde zeigt das Cockpit nur die Abfrage.
+- Marco (29.10.): direkt bauen und veröffentlichen; Team-Prüfung (Siggi, Bodo, Doris, Lotte) folgt nachträglich. Vorab geprüft: eigener Fake-Server-Lauf (16/16), bisherige Tests grün, Freigabe-Prüfung bestanden.

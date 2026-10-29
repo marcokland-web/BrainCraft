@@ -14,6 +14,7 @@ import {
   type QuestionRow,
 } from '../lib/store'
 import { ShopManager } from './ShopManager'
+import { resetTogether, Together, togetherRunning } from './Together'
 
 const IDLE_MS = 3 * 60_000
 
@@ -73,8 +74,8 @@ function PinPad({ onDone }: { onDone: () => void }) {
   )
 }
 
-// Lösung einer Frage als kurzer Text für die Freigabe
-function solution(q: Question): string {
+// Lösung einer Frage als kurzer Text (Freigabe und Gemeinsam-Abfragen)
+export function solution(q: Question): string {
   switch (q.type) {
     case 'multiple_choice': return q.payload.options[q.payload.correct_index]
     case 'word_clicker': return q.payload.sentence_with_gap.replace('[GAP]', q.payload.correct_word)
@@ -96,6 +97,8 @@ export function Parents({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false)
   const dialog = useRef<HTMLDialogElement>(null)
   const [error, setError] = useState<string | null>(null)
+  // Während einer Gemeinsam-Runde zeigt das Cockpit nur die Abfrage (ein Hauptknopf je Ansicht)
+  const [quizzing, setQuizzing] = useState(togetherRunning)
   const unlocked = parentActive() && !!s.pull?.parent
 
   // Sperre läuft nach 14 Minuten ab: einmal pro Minute neu zeichnen
@@ -108,6 +111,7 @@ export function Parents({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (!unlocked) return
     const lockAndClose = () => {
+      resetTogether()
       parentLock()
       onClose()
     }
@@ -142,7 +146,7 @@ export function Parents({ onClose }: { onClose: () => void }) {
       <section className="bc-view parents">
         <div className="parents-bar">
           <h1 className="bc-title">{t.cockpitTitle}</h1>
-          <button type="button" className="btn plain" onClick={onClose}>{t.done}</button>
+          <button type="button" className="btn plain" onClick={() => { resetTogether(); onClose() }}>{t.done}</button>
         </div>
         <PinPad onDone={() => tick((n) => n + 1)} />
       </section>
@@ -171,11 +175,15 @@ export function Parents({ onClose }: { onClose: () => void }) {
     <section className="bc-view parents">
       <div className="parents-bar">
         <h1 className="bc-title">{t.cockpitTitle}</h1>
-        <button type="button" className="btn tinted" onClick={() => { parentLock(); onClose() }}>{t.lockNow}</button>
+        <button type="button" className="btn tinted" onClick={() => { resetTogether(); parentLock(); onClose() }}>{t.lockNow}</button>
       </div>
 
       {error && <p className="setup-err" role="alert">{error}</p>}
 
+      <Together onRunning={setQuizzing} />
+
+      {!quizzing && (
+      <>
       <div>
         <p className="kicker">{t.approveTitle}</p>
         {drafts.length === 0 ? (
@@ -235,6 +243,9 @@ export function Parents({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+
+      </>
+      )}
 
       <dialog ref={dialog} className="settings confirm" onClose={() => setAskDisconnect(false)}>
         <div className="st">

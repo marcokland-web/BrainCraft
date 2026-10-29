@@ -414,6 +414,16 @@ export async function resolveRedemption(id: string, status: 'erledigt' | 'storni
   await refresh()
 }
 
+// Gemeinsam-Abfragen: direkt senden (nicht in die gespeicherte Warteschlange, die kein Eltern-Token kennt).
+// Die Antwort-ID kommt vom Aufrufer und bleibt bei Wiederholung gleich (kein Doppelstern). Liefert die gebuchten Sterne.
+export async function parentAnswer(a: { answerId: string; profileId: string; questionId: string; correct: boolean; roundId: string }) {
+  const r = await parentRpc<{ stars_booked?: number }>('bc_answer', {
+    p_answer_id: a.answerId, p_profile_id: a.profileId, p_question_id: a.questionId, p_correct: a.correct,
+    p_first_try: true, p_mode: 'eltern', p_answered_at: new Date().toISOString(), p_round_id: a.roundId,
+  })
+  return r.stars_booked ?? 0
+}
+
 // ---------- Abgeleitete Werte ----------
 
 export function currentProfile(s: State) {
