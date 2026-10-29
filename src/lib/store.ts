@@ -308,7 +308,7 @@ export function flush(): Promise<void> {
         } catch (e) {
           // „Gesehen“ ist nur eine Komfortangabe: bei jedem Fehler außer offline verwerfen (z. B. vor Migration 004)
           if (item.kind === 'seen' && !(e instanceof ApiError && e.code === 'offline')) {
-            set({ queue: state.queue.slice(1) })
+            set({ queue: state.queue.filter((q) => q !== item) })
             continue
           }
           if (e instanceof ApiError && (e.code === 'offline' || e.code === 'server_error' || e.code === 'retry')) {
@@ -319,7 +319,9 @@ export function flush(): Promise<void> {
           if (item.kind === 'boss' && e instanceof ApiError && e.code === 'boss_locked') write(K.bossLocked, true)
           // Inhaltlicher Fehler (z. B. Frage gelöscht, Runde zu kurz): Eintrag verwerfen, sonst hängt die Schlange
         }
-        set({ queue: state.queue.slice(1), offline: false })
+        // Über den Eintrag selbst entfernen: Hat jemand die Schlange inzwischen gekürzt (Zurücksetzen),
+        // ginge mit slice(1) sonst ein fremder, noch nicht gesendeter Eintrag verloren (Siggi N2, Bodo)
+        set({ queue: state.queue.filter((q) => q !== item), offline: false })
       }
     } finally {
       set({ syncing: false })
@@ -434,10 +436,13 @@ export async function deleteExam(id: string) {
 // Sterne und Fortschritt zurücksetzen (ein Kind oder null = alle). Braucht zusätzlich die PIN.
 // Wartende Antworten der betroffenen Kinder werden verworfen, sonst käme alter Fortschritt zurück.
 export async function resetProgress(pin: string, profileId: string | null) {
+  // Erst laufende/wartende Sendungen abschließen, damit keine Antwort NACH dem Zurücksetzen ankommt (Siggi N2)
+  await flush()
   const r = await parentRpc<{ ok: boolean; error?: string; locked_until?: string }>('bc_progress_reset', { p_pin: pin, p_profile_id: profileId })
   if (r.ok) {
     set({ queue: state.queue.filter((q) => profileId !== null && q.profileId !== profileId) })
-    await refresh()
+    // Zurücksetzen hat geklappt: ein Fehler beim Nachladen darf nicht als „hat nicht geklappt“ erscheinen (Bodo)
+    await refresh().catch(() => undefined)
   }
   return r
 }

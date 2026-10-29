@@ -427,3 +427,137 @@ test('applyPull: gewähltes Kind bleibt, unbekanntes -> erstes Kind', async () =
   await s2.connect(CODE)
   assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID)
 })
+
+// ---------- Zurücksetzen (Migration 006, Siggi N2) ----------
+async function parentStore(storage: Record<string, unknown> = {}) {
+  const s = await freshStore(storage)
+  const TOK = 'b'.repeat(64)
+  handler = (fn, args) => (fn === 'bc_parent_unlock' ? json({ ok: true, token: TOK, expires_at: 'x' }) : defaultHandler(fn, args))
+  await s.connect(CODE)
+  await s.parentUnlock('4711')
+  calls = []
+  return { s, TOK }
+}
+const qa = (id: string, profileId: string) => ({ kind: 'answer', id, profileId, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T08:00:00Z', roundId: null })
+
+test('resetProgress: wartende Antworten gehen VOR dem Zurücksetzen raus, Antwort in der Leitung überholt es nicht', async () => {
+  const { s } = await parentStore()
+  const order: string[] = []
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  let gated = false
+  handler = async (fn, args) => {
+    order.push(fn + (fn === 'bc_answer' ? ':' + args.p_answer_id : ''))
+    if (fn === 'bc_answer' && !gated) { gated = true; await gate }
+    if (fn === 'bc_progress_reset') return json({ ok: true, profiles: 1, reset_at: 'x' })
+    if (fn === 'bc_pull') return json(fakePull({ profiles: fakePull().profiles.map((p: any) => (p.id === KID ? { ...p, stars_balance: 0, stars_today: 0 } : p)) }))
+    return json({ ok: true })
+  }
+  // A (Lia) ist gerade unterwegs, B (Ben) wartet
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null })
+  await tick(5)
+  assert.equal(order.length, 1, 'A ist unterwegs')
+  const p = s.resetProgress('1234', KID)
+  await tick(20)
+  assert.ok(!order.includes('bc_progress_reset'), 'Zurücksetzen wartet, bis A beantwortet ist: ' + order.join(','))
+  release()
+  const r = await p
+  assert.equal(r.ok, true)
+  const iReset = order.indexOf('bc_progress_reset')
+  assert.ok(iReset > 0, 'bc_progress_reset gesendet')
+  assert.ok(!order.slice(iReset).some((x) => x.startsWith('bc_answer')), 'keine Antwort nach dem Zurücksetzen: ' + order.join(','))
+  assert.equal(order[order.length - 1], 'bc_pull', 'danach frischer Stand')
+  assert.deepEqual(queueLS(), [])
+  const saved = JSON.parse(mem.get('braincraft:pull')!)
+  assert.equal(saved.profiles.find((p: any) => p.id === KID).stars_balance, 0, 'Stand aus bc_pull übernommen (0), kein Zusammenführen mit lokal +1')
+})
+
+test('resetProgress: Schlange hängt (server_error) -> nur Einträge der betroffenen Kinder fallen weg', async () => {
+  const { s } = await parentStore({ 'braincraft:queue': [] })
+  let answerDown = true
+  handler = (fn, args) => {
+    if (fn === 'bc_answer') return answerDown ? json({ message: 'boom' }, 500) : json({ ok: true })
+    if (fn === 'bc_progress_reset') return json({ ok: true, profiles: args.p_profile_id ? 1 : 2, reset_at: 'x' })
+    return defaultHandler(fn, args)
+  }
+  // drei hängende Einträge über die öffentliche API: Lia, Ben, Lia
+  s.selectProfile(KID); s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null })
+  s.selectProfile(KID2); s.queueAnswer({ questionId: 'q6', correct: true, firstTry: true, mode: 'solo', roundId: null })
+  s.selectProfile(KID); s.markUnitSeen('u1')
+  await tick(10)
+  assert.equal(queueLS().length, 3)
+  const r = await s.resetProgress('1234', KID)
+  assert.equal(r.ok, true)
+  assert.deepEqual(queueLS().map((q: any) => q.profileId), [KID2], 'nur Bens Eintrag bleibt')
+  answerDown = false
+  calls = []
+  await s.flush()
+  assert.deepEqual(answers().map((c) => c.args.p_profile_id), [KID2], 'Ben wird genau einmal nachgesendet')
+  // alle Kinder: Schlange ganz leer
+  answerDown = true
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null })
+  await tick(5)
+  await s.resetProgress('1234', null)
+  assert.deepEqual(queueLS(), [])
+})
+
+test('resetProgress: falsche PIN / Sperre / Bremse / fehlende Funktion lassen die Schlange stehen', async () => {
+  const { s } = await parentStore()
+  handler = (fn, args) => {
+    if (fn === 'bc_answer') return json({ message: 'boom' }, 500)
+    if (fn === 'bc_progress_reset') {
+      if (args.p_pin === '0000') return json({ ok: false, error: 'pin_wrong', locked_until: null })
+      if (args.p_pin === '1111') return json({ ok: false, error: 'pin_locked', locked_until: '2026-10-24T08:15:00Z' })
+      if (args.p_pin === '5555') return err('limit_reached')
+      if (args.p_pin === '6666') return err('profile_not_found')
+      return json({ code: 'PGRST202', message: 'Could not find the function' }, 404)
+    }
+    return defaultHandler(fn, args)
+  }
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null })
+  await tick(5)
+  assert.equal((await s.resetProgress('0000', KID)).error, 'pin_wrong')
+  assert.equal((await s.resetProgress('1111', KID)).error, 'pin_locked')
+  await assert.rejects(s.resetProgress('5555', KID), (e: any) => e.code === 'limit_reached')
+  await assert.rejects(s.resetProgress('6666', KID), (e: any) => e.code === 'profile_not_found')
+  await assert.rejects(s.resetProgress('9999', KID), (e: any) => e.code === 'missing_function')
+  assert.equal(queueLS().length, 1, 'Antwort bleibt in der Schlange')
+})
+
+test('resetProgress: Erfolg, aber Nachladen scheitert -> trotzdem ok (keine falsche Fehlermeldung)', async () => {
+  const { s } = await parentStore()
+  handler = (fn) => {
+    if (fn === 'bc_progress_reset') return json({ ok: true, profiles: 1, reset_at: 'x' })
+    if (fn === 'bc_pull') return err('not_found')
+    return json({ ok: true })
+  }
+  const r = await s.resetProgress('1234', KID)
+  assert.equal(r.ok, true)
+})
+
+test('flush: Schlange wird während einer Sendung ersetzt -> der neue Eintrag geht nicht verloren (slice(1)-Falle)', async () => {
+  handler = defaultHandler
+  const s = await freshStore({ 'braincraft:code': CODE, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  await tick(5)
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  let first = true
+  handler = async (fn, args) => {
+    if (fn === 'bc_answer' && first) { first = false; await gate }
+    return defaultHandler(fn, args)
+  }
+  calls = []
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null }) // A, hängt
+  await tick(5)
+  // Während A unterwegs ist: abmelden, neu verbinden, neue Antwort C
+  s.disconnect()
+  await s.connect(CODE)
+  s.selectProfile(KID)
+  s.queueAnswer({ questionId: 'q2', correct: true, firstTry: true, mode: 'solo', roundId: null }) // C
+  await tick(5)
+  release()
+  await tick(20)
+  await s.flush()
+  assert.ok(answers().some((c) => c.args.p_question_id === 'q2'), 'C wurde gesendet')
+  assert.deepEqual(queueLS(), [])
+})

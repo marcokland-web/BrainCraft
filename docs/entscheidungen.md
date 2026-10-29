@@ -81,3 +81,8 @@
 - BrainCraft ist live unter https://marcokland-web.github.io/BrainCraft/ (Repository marcokland-web/BrainCraft, GitHub Actions → Pages). Migration 005 eingespielt (geprüft 29.10.).
 - Gemeinsam-Abfragen im Eltern-Cockpit: Kind und Arbeit (oder „Alles, was fällig ist“) wählen, Runde über buildRound (Vorabend wie Chill), mündliche Fassung je Spielform, Lösung zuerst verdeckt, „Gewusst (+1 Stern)“ / „Nochmal üben“ (nicht rot). Antworten direkt mit Eltern-Token (mode 'eltern'), feste Antwort-ID je Frage; Runde nur im Speicher, nach PIN weiter bei derselben Frage, beim Sperren/Verlassen verworfen. Während der Runde zeigt das Cockpit nur die Abfrage.
 - Marco (29.10.): direkt bauen und veröffentlichen; Team-Prüfung (Siggi, Bodo, Doris, Lotte) folgt nachträglich. Vorab geprüft: eigener Fake-Server-Lauf (16/16), bisherige Tests grün, Freigabe-Prüfung bestanden.
+
+## 29.10.2026 – Klassenarbeiten löschen, Zurücksetzen (Migration 006)
+- Eltern-Cockpit „Klassenarbeiten“: einzeln löschen (bc_exam_delete, Rückfrage mit rotem Knopf); Folien, Fragen, Lernstand und Antworten dazu werden mitgelöscht, verdiente Sterne und Teile bleiben.
+- „Neu anfangen“: Sterne und Fortschritt zurücksetzen (bc_progress_reset, Migration 006) mit Eltern-Token und PIN, ein Kind oder alle; löscht progress, answers, unit_views, star_ledger, inventory, boss_wins, redemptions (auch offene Gutscheine, ohne Rückbuchung); Bremse 5 je 24 h. Freigegeben von Sicherheits-Siggi und Bug-Bodo (docs/pruefung/*-006.md).
+- Offen für Migration 007: alte Offline-Antworten anderer Geräte werden nach dem Zurücksetzen neu gebucht (profiles.progress_reset_at). Bis dahin Hinweis in der Rückfrage.

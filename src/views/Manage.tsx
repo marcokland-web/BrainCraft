@@ -4,7 +4,7 @@ import { Sheet } from '../components/Sheet'
 import { ApiError } from '../lib/api'
 import { locale, useT } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
-import { deleteExam, parentLock, resetProgress, useStore, type ExamRow } from '../lib/store'
+import { deleteExam, parentLock, refresh, resetProgress, useStore, type ExamRow } from '../lib/store'
 
 // Verwalten im Eltern-Cockpit: einzelne Klassenarbeiten löschen und Sterne/Fortschritt zurücksetzen.
 // Beides mit Rückfrage und rotem Knopf (Studio-Regel); Zurücksetzen verlangt zusätzlich die PIN.
@@ -31,10 +31,12 @@ export function Manage() {
     return new Date(y, m - 1, dd).toLocaleDateString(locale(lang), { day: 'numeric', month: 'long', year: 'numeric' })
   }
 
-  function fail(e: unknown) {
+  function fail(e: unknown, limitText = t.errLimit) {
     const code = e instanceof ApiError ? e.code : ''
     if (code === 'pin_required') return parentLock()
-    setError(code === 'offline' ? t.errOffline : code === 'missing_function' ? t.errNotReady : t.errGeneric)
+    // Kind inzwischen auf einem anderen Gerät gelöscht: Liste neu laden
+    if (code === 'profile_not_found') void refresh().catch(() => undefined)
+    setError(code === 'offline' ? t.errOffline : code === 'missing_function' ? t.errNotReady : code === 'limit_reached' ? limitText : t.errGeneric)
   }
 
   async function removeExam() {
@@ -66,7 +68,8 @@ export function Manage() {
           : t.pinWrong)
       }
     } catch (e) {
-      fail(e)
+      // Bremse beim Zurücksetzen: 5 in 24 h (eigener Text statt „etwas löschen oder abhaken“)
+      fail(e, t.resetLimit)
     } finally {
       setPin('')
       setBusy(false)
@@ -104,7 +107,7 @@ export function Manage() {
         <p className="kicker">{t.resetTitle}</p>
         {notice && <p className="muted bc-small manage-notice" role="status">{notice}</p>}
         <div className="list">
-          <button type="button" className="row danger-row" onClick={() => { setError(null); setNotice(null); setPin(''); setAskReset(true) }}>
+          <button type="button" className="row danger-row" onClick={() => { setError(null); setNotice(null); setPin(''); setWho(kids.length > 1 ? 'all' : (kids[0]?.id ?? 'all')); setAskReset(true) }}>
             <span className="tx"><b>{t.resetRow}</b></span>
           </button>
         </div>
