@@ -390,3 +390,14 @@ dialog.confirm .st-grab{display:none}
 .parents .manage-reset{display:grid;gap:14px}
 .parents .manage-reset > p{margin:0}
 .parents .manage-reset .field input{letter-spacing:.3em}
+
+/* Scan-Anleitung im Eltern-Cockpit */
+.parents .scan-guide{margin-top:8px;border-top:1px solid var(--line);padding-top:4px}
+.parents .scan-guide summary{cursor:pointer;min-height:44px;display:flex;align-items:center;color:var(--accent);font-weight:600;list-style-position:inside}
+.parents .scan-guide summary:focus-visible{outline:3px solid var(--accent);border-radius:8px}
+.parents .scan-guide ol{margin:4px 0 0;padding-left:22px;display:grid;gap:14px}
+.parents .scan-guide li > b{display:block;margin-bottom:4px}
+.parents .scan-guide li p{margin:0 0 6px;color:var(--fg)}
+.parents .scan-code{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:6px 6px 6px 12px;border-radius:var(--r-s);background:var(--fill)}
+.parents .scan-code code{flex:1;min-width:0;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;user-select:all}
+.parents .scan-code .btn{min-height:44px;flex:none;font-size:15px}

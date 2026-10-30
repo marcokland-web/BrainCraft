@@ -75,6 +75,48 @@ function PinPad({ onDone }: { onDone: () => void }) {
   )
 }
 
+// Scan-Anleitung (Schritt für Schritt, Befehle zum Kopieren); aufklappbar, damit das Cockpit kurz bleibt
+function ScanGuide() {
+  const t = useT()
+  const [copied, setCopied] = useState<number | null>(null)
+
+  async function copy(text: string, i: number) {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(i)
+      window.setTimeout(() => setCopied(null), 2000)
+    } catch {
+      // Ohne Zwischenablage-Recht: Text bleibt markierbar
+    }
+  }
+
+  return (
+    <details className="scan-guide">
+      <summary>{t.scanGuide}</summary>
+      <ol>
+        {t.scanSteps.map((step, i) => (
+          <li key={i}>
+            <b>{step.title}</b>
+            {step.lines.map((line, k) => (
+              <div key={k}>
+                <p>{line}</p>
+                {k === 0 && step.code && (
+                  <div className="scan-code">
+                    <code>{step.code}</code>
+                    <button type="button" className="btn plain" onClick={() => copy(step.code, i)}>
+                      {copied === i ? t.scanCopied : t.scanCopy}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </li>
+        ))}
+      </ol>
+    </details>
+  )
+}
+
 // Lösung einer Frage als kurzer Text (Freigabe und Gemeinsam-Abfragen)
 export function solution(q: Question): string {
   switch (q.type) {
@@ -232,6 +274,7 @@ export function Parents({ onClose }: { onClose: () => void }) {
         <div className="card scan-help">
           <p>{t.scanText}</p>
           <p className="muted">{t.scanHint}</p>
+          <ScanGuide />
         </div>
       </div>
 

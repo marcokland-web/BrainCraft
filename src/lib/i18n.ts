@@ -246,8 +246,48 @@ const de = {
   hide: 'Ausblenden',
   answerLabel: 'Lösung',
   scanTitle: 'Klassenarbeit scannen',
-  scanText: 'Scannen geht am Mac mit Claude Code: Fotos in den Ordner BrainCraft/scans legen und „Scanne die Klassenarbeit“ sagen. Danach erscheinen die Fragen hier zur Freigabe.',
+  scanText: 'Gescannt wird am Mac mit Claude Code, ohne Kosten. Das dauert etwa 5 Minuten. Danach erscheinen die Fragen hier zur Freigabe.',
   scanHint: 'Tipp: Namen, Schule und Noten auf dem Foto abdecken.',
+  scanGuide: 'Anleitung Schritt für Schritt',
+  scanCopy: 'Kopieren',
+  scanCopied: 'Kopiert',
+  scanSteps: [
+    {
+      title: 'Fotos ablegen',
+      lines: [
+        'Heftseiten mit dem iPhone fotografieren, gerade und scharf. Namen, Schule und Noten abdecken.',
+        'Per AirDrop an den Mac schicken (landen in „Downloads“).',
+        'Im Finder unter Apps → BrainCraft → scans einen neuen Ordner je Klassenarbeit anlegen, kurz und ohne Leerzeichen oder Umlaute, z. B. „sachkunde-wasser“. Die Fotos hineinziehen (JPEG, PNG oder HEIC).',
+      ],
+      code: '',
+    },
+    {
+      title: 'In Claude Code erkennen lassen',
+      lines: [
+        'Claude Code im Ordner BrainCraft öffnen und schreiben, mit Ordner, Fach, Titel und Datum:',
+        'Claude liest die Fotos, schreibt 3–5 Lernfolien und die Fragen, prüft alles und nennt am Ende die Zeile für Schritt 3.',
+      ],
+      code: 'Scanne die Klassenarbeit in scans/sachkunde-wasser. Fach Sachkunde, Titel „Der Wasserkreislauf“, Arbeit am 12.11.',
+    },
+    {
+      title: 'Im Terminal einspielen',
+      lines: [
+        'Die App „Terminal“ öffnen (nicht Claude Code, damit die PIN verdeckt bleibt) und diese Zeile mit eurem Ordnernamen einfügen:',
+        'Gefragt wird nach dem Familien-Code (steht unten unter „Familien-Code anzeigen“) und der Eltern-PIN. Bei der PIN sieht man beim Tippen nichts, danach Enter.',
+        'Am Ende steht „✓ … neue Fragen als Entwurf eingespielt“. Die Klassenarbeit wird bei Bedarf automatisch angelegt.',
+      ],
+      code: 'cd ~/Apps/BrainCraft && node tools/braincraft.ts einspielen scans/sachkunde-wasser',
+    },
+    {
+      title: 'Hier freigeben',
+      lines: [
+        'Die neuen Fragen stehen oben unter „Fragen freigeben“, jeweils mit Lösung. Kurz durchsehen, dann „Alle freigeben“; unpassende Fragen „Ausblenden“.',
+        'Euer Kind sieht danach die Lernfolien unter „Lernen“. Sobald es ein Kapitel angeschaut hat, kommen dessen Fragen ins Spiel.',
+        'Die Fotos werden nirgends hochgeladen. Wenn alles eingespielt ist, könnt ihr den Ordner löschen.',
+      ],
+      code: '',
+    },
+  ],
   // Gemeinsam-Abfragen (Eltern fragen mündlich ab)
   quizTitle: 'Gemeinsam abfragen',
   quizText: 'Ihr stellt die Fragen mündlich, euer Kind antwortet ohne Tippen. Ihr tippt, ob es die Antwort wusste.',
@@ -569,8 +609,48 @@ const en: Dict = {
   hide: 'Hide',
   answerLabel: 'Answer',
   scanTitle: 'Scan a test',
-  scanText: 'Scanning works on the Mac with Claude Code: put the photos in the BrainCraft/scans folder and say “Scan the test”. The questions then appear here for approval.',
+  scanText: 'Scanning happens on the Mac with Claude Code, at no cost. It takes about 5 minutes. The questions then appear here for approval.',
   scanHint: 'Tip: cover names, school and marks on the photo.',
+  scanGuide: 'Step-by-step guide',
+  scanCopy: 'Copy',
+  scanCopied: 'Copied',
+  scanSteps: [
+    {
+      title: 'Save the photos',
+      lines: [
+        'Take photos of the exercise book pages with the iPhone, straight and sharp. Cover names, school and marks.',
+        'AirDrop them to the Mac (they land in “Downloads”).',
+        'In Finder, create a new folder per test under Apps → BrainCraft → scans, short and without spaces or umlauts, e.g. “science-water”. Drag the photos in (JPEG, PNG or HEIC).',
+      ],
+      code: '',
+    },
+    {
+      title: 'Let Claude Code read them',
+      lines: [
+        'Open Claude Code in the BrainCraft folder and write, with folder, subject, title and date:',
+        'Claude reads the photos, writes 3–5 slides and the questions, checks everything and gives you the line for step 3.',
+      ],
+      code: 'Scan the test in scans/science-water. Subject science, title “The water cycle”, test on 12 November.',
+    },
+    {
+      title: 'Import in Terminal',
+      lines: [
+        'Open the “Terminal” app (not Claude Code, so the PIN stays hidden) and paste this line with your folder name:',
+        'It asks for the family code (see “Show family code” below) and the parent PIN. Nothing shows while typing the PIN, then press Enter.',
+        'At the end it says “✓ … new questions imported as drafts”. The test is created automatically if needed.',
+      ],
+      code: 'cd ~/Apps/BrainCraft && node tools/braincraft.ts einspielen scans/science-water',
+    },
+    {
+      title: 'Approve here',
+      lines: [
+        'The new questions appear above under “Approve questions”, each with its answer. Look through them, then “Approve all”; “Hide” the ones you don’t like.',
+        'Your child then sees the slides under “Learn”. Once a chapter has been viewed, its questions join the game.',
+        'The photos are never uploaded. Once everything is imported, you can delete the folder.',
+      ],
+      code: '',
+    },
+  ],
   quizTitle: 'Quiz together',
   quizText: 'You ask the questions out loud, your child answers without tapping. You tap whether they knew it.',
   quizFor: 'Child',
