@@ -572,7 +572,7 @@ async function pin(page, digits) {
   ok('Alle freigeben: p_ids [d1,d4]', all && JSON.stringify([...all.args.p_ids].sort()) === '["d1","d4"]', JSON.stringify(all?.args))
   ok('Alle freigeben: leerer Zustand', (await page.locator('.bc-empty', { hasText: 'Keine neuen Fragen' }).count()) === 1 && (await page.locator('.approve').count()) === 0)
   // Familien-Code anzeigen
-  await page.getByText('Familien-Code anzeigen').click()
+  await page.getByRole('button', { name: 'Familien-Code anzeigen' }).click()
   ok('Cockpit: Code anzeigen', (await page.locator('.parents').innerText()).includes(CODE))
   // Sperren
   srv.calls.length = 0
