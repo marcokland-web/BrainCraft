@@ -1,10 +1,11 @@
 -- =====================================================================
 -- BrainCraft 002: Scan-Absicherung für die Edge Function bc-extract
 -- Entwurf von Daten-Dieter, Stand 23.10.2026 (Befunde Sicherheits-Siggi zur Edge Function).
--- Ziel: Supabase-Projekt asfwbuptsfcrgmmgdgim. Setzt 001_braincraft.sql voraus und
--- ergänzt nur. NOCH NICHT EINGESPIELT.
+-- Ziel: Supabase-Projekt asfwbuptsfcrgmmgdgim. Setzt 001_braincraft.sql und (seit 03.11.2026)
+-- 007_google.sql voraus und ergänzt nur. NOCH NICHT EINGESPIELT (ruht, siehe docs/entscheidungen.md).
 --
---  * bc_scan_check   (anon): Auftrag gehört zur Familie? Eltern-Token gültig? Status.
+--  * bc_scan_check   (authenticated): Auftrag gehört zur Familie des angemeldeten Kontos
+--                     (auth.uid(), Migration 007)? Eltern-Token gültig? Status.
 --                     Ersetzt den teuren bc_pull in der Edge Function.
 --  * bc_scan_tick    (service_role): zählt KI-Aufrufe je Auftrag und begrenzt sie:
 --                     analyze <= 2 x image_count und merge <= 2 je Auftrag,
@@ -41,12 +42,12 @@ create index if not exists scan_jobs_created_idx on braincraft.scan_jobs (create
 -- Öffentliche Funktionen
 -- ---------------------------------------------------------------------
 
--- Für die Edge Function mit dem Code der Familie (auch anon): gehört der Auftrag zur Familie,
--- ist das Eltern-Token gültig (Token darf null sein)? Ohne gültigen Code: not_found.
+-- Für die Edge Function im Namen des angemeldeten Kontos (JWT der Eltern): gehört der Auftrag zur
+-- Familie, ist das Eltern-Token gültig (Token darf null sein)? Ohne Familie: no_family / not_signed_in.
 -- found = false verrät nicht, ob es den Auftrag in einer anderen Familie gibt.
-create or replace function public.bc_scan_check(p_code text, p_token text, p_job_id uuid)
+create or replace function public.bc_scan_check(p_token text, p_job_id uuid)
 returns jsonb language plpgsql stable security definer set search_path = '' as $$
-declare f uuid := braincraft.family(p_code); r record;
+declare f uuid := braincraft.my_family(); r record;
 begin
   select j.status, j.images_deleted_at into r
     from braincraft.scan_jobs j where j.id = p_job_id and j.family_id = f;
@@ -150,14 +151,19 @@ revoke all on all functions in schema braincraft from public, anon, authenticate
 do $$
 declare r record;
 begin
-  for r in select p.oid::regprocedure as sig, p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-           where n.nspname = 'public' and p.proname like 'bc\_%' loop
+  for r in select p.oid::regprocedure as sig, p.proname, coalesce('p_code' = any(p.proargnames), false) as legacy
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.proname like 'bc\_%' loop
     execute format('revoke all on function %s from public, anon, authenticated', r.sig);
     if r.proname in ('bc_pin_reset', 'bc_scan_update', 'bc_scan_stale', 'bc_invite_create',
                      'bc_scan_tick', 'bc_scan_orphans', 'bc_cron_secret') then
       execute format('grant execute on function %s to service_role', r.sig);
-    else
+    elsif r.legacy or r.proname = 'bc_create' then
+      -- alte Familien-Code-Funktionen, nur bis 008
       execute format('grant execute on function %s to anon, authenticated, service_role', r.sig);
+    else
+      -- Rechte wie 007: nur angemeldete Konten
+      execute format('grant execute on function %s to authenticated, service_role', r.sig);
     end if;
   end loop;
 end $$;

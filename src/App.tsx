@@ -70,8 +70,10 @@ export function App() {
   const [boss, setBoss] = useState<{ exam: Exam; id: string; replay: boolean } | null>(null)
   const [learnExam, setLearnExam] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
-  const connected = !!s.code && !!s.pull
-  const playDemo = demo && !connected
+  // Familie und Stand auf dem Gerät: spielbar, auch offline und während die Sitzung noch geladen wird.
+  // Nur wenn das Gerät nachweislich abgemeldet ist, erscheint die Anmeldung (Kinder sehen sie sonst nie).
+  const connected = !!s.family && !!s.pull && s.auth !== 'signed_out'
+  const playDemo = demo && !connected && !s.family
   const stars = connected ? (currentProfile(s)?.stars_balance ?? 0) : 0
 
   // iOS: Ton erst nach der ersten Berührung erlaubt
@@ -172,7 +174,7 @@ export function App() {
     if (log.filter((a) => a.kind === 'normal').length >= ROUND_MIN) queueRoundFinish(round.id)
   }
 
-  if (!s.code && !demo) {
+  if (!connected && !(demo && !s.family)) {
     return (
       <div className="app">
         <div className="setup-top">

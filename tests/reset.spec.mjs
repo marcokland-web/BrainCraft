@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { authRoute, bearerOk, FAMILY, session } from './fake-auth.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PW = process.env.PLAYWRIGHT_DIR ?? join(homedir(), 'Apps/DasTeam/tools/node_modules/playwright')
@@ -36,7 +37,6 @@ const T = (key, lang = 'de') => {
 // ---------- Fake-Daten und Fake-Server (Verhalten wie supabase/006_zuruecksetzen.sql) ----------
 const KID = '11111111-1111-4111-8111-111111111111'
 const KID2 = '22222222-2222-4222-8222-222222222222'
-const CODE = 'ABCD-EFGH-JKMN-PQRS-TUVW'
 const TOKEN = 'f'.repeat(64)
 const later = new Date(Date.now() + 30 * 86400000).toISOString()
 const today = new Date().toISOString().slice(0, 10)
@@ -72,7 +72,10 @@ function makeServer() {
     srv.calls.push({ fn, args })
     const reply = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body) })
     const fail = (message) => reply({ code: 'P0001', message }, 400)
-    if (args.p_code !== CODE) return fail('not_found')
+    // Google-Sitzung statt Familien-Code (Migration 007)
+    if (!bearerOk(route)) return reply({ code: '42501', message: 'permission denied' }, 401)
+    if ('p_code' in args) return fail('p_code_not_expected')
+    if (fn === 'bc_session') return reply({ family_id: FAMILY, joined: false })
     switch (fn) {
       case 'bc_pull': { const d = structuredClone(srv.data); d.parent = args.p_token === TOKEN; return reply(d) }
       case 'bc_parent_unlock': return args.p_pin === '2468' ? reply({ ok: true, token: TOKEN, expires_at: later }) : reply({ ok: false, error: 'pin_wrong', locked_until: null })
@@ -111,10 +114,11 @@ async function open({ size = 'iphone', lang = 'de', theme = 'light', srv = makeS
     const u = route.request().url()
     if (u.startsWith(new URL(BASE).origin + '/')) return route.continue()
     if (u.includes('.supabase.co/rest/v1/rpc/')) return srv.handle(route)
+    if (u.includes('.supabase.co/auth/v1/')) return authRoute(route)
     foreign.push(u)
     return route.abort()
   })
-  const init = { 'studio-lang': lang, 'studio-theme': theme, 'braincraft:code': JSON.stringify(CODE), 'braincraft:profile': JSON.stringify(KID), 'braincraft:queue': JSON.stringify(queue) }
+  const init = { 'studio-lang': lang, 'studio-theme': theme, 'braincraft-auth': JSON.stringify(session()), 'braincraft:family': JSON.stringify(FAMILY), 'braincraft:profile': JSON.stringify(KID), 'braincraft:queue': JSON.stringify(queue) }
   await ctx.addInitScript((init) => {
     if (sessionStorage.getItem('__seeded')) return
     sessionStorage.setItem('__seeded', '1')

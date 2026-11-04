@@ -1,5 +1,6 @@
-// Bug-Bodo: Ablauf-Test der Datenanbindung (Setup, Start, Warteschlange, Eltern-Cockpit) mit FAKE-Server.
-// Alle Anfragen an Supabase werden per context.route abgefangen; Service Worker ist blockiert.
+// Bug-Bodo: Ablauf-Test der Datenanbindung (Anmeldung mit Google, Setup, Start, Warteschlange, Eltern-Cockpit)
+// mit FAKE-Server. Alle Anfragen an Supabase (RPC und Auth) werden per context.route abgefangen, Google wird
+// über tests/fake-auth.mjs nachgestellt; Service Worker ist blockiert.
 // Jede andere fremde Anfrage wird abgebrochen und als Fehler gezählt. Die echte Datenbank wird NIE erreicht.
 // Vorher: cd /Users/marcokland/Apps/BrainCraft && npm run build && npx vite preview --port 8797 --strictPort
 // Aufruf:  node tests/store.spec.mjs        (BASE=… überschreibt die Adresse, BROWSER=webkit für Safari)
@@ -11,6 +12,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { authRoute, bearerOk, FAMILY, signedIn, USER } from './fake-auth.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PW = process.env.PLAYWRIGHT_DIR ?? join(homedir(), 'Apps/DasTeam/tools/node_modules/playwright')
@@ -28,7 +30,6 @@ const foreign = []
 // ---------- Fake-Daten ----------
 const KID = '11111111-1111-4111-8111-111111111111'
 const KID2 = '22222222-2222-4222-8222-222222222222'
-const CODE = 'ABCD-EFGH-JKMN-PQRS-TUVW'
 const TOKEN = 'f'.repeat(64)
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const day = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d) }
@@ -40,7 +41,7 @@ const mc = (id, exam, status = 'freigegeben') => ({
 })
 function basePull() {
   return {
-    today: day(0), parent: false,
+    family_id: FAMILY, today: day(0), parent: false,
     profiles: [
       { id: KID, child_name: 'Lia', avatar_id: 'a', stars_balance: 42, stars_today: 3, learn_days_week: 4 },
       { id: KID2, child_name: 'Ben', avatar_id: 'b', stars_balance: 7, stars_today: 0, learn_days_week: 1 },
@@ -75,7 +76,8 @@ function basePull() {
 
 // ---------- Fake-Server ----------
 function makeServer() {
-  const srv = { calls: [], down: false, data: basePull(), pullDelay: 0, codes: new Set([CODE]) }
+  // family: Familie des angemeldeten Kontos (null = Konto ohne Familie); auth: Optionen für fake-auth (deny, log)
+  const srv = { calls: [], down: false, data: basePull(), pullDelay: 0, family: FAMILY, auth: { log: [] }, invites: [], myInvites: [] }
   srv.handle = async (route) => {
     const req = route.request()
     const url = req.url()
@@ -87,10 +89,31 @@ function makeServer() {
     const reply = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body) })
     const fail = (message) => reply({ code: 'P0001', message }, 400)
     if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST' } })
-    const known = srv.codes.has(args.p_code)
+    // Ohne Zugangstoken verweigert PostgREST die Funktionen (nur für angemeldete Konten, Migration 007)
+    if (!bearerOk(route)) return reply({ code: '42501', message: `permission denied for function ${fn}` }, 401)
+    if ('p_code' in args) return fail('p_code_not_expected')
+    if (fn === 'bc_session') return reply({ family_id: srv.family })
+    if (fn === 'bc_my_invites') return reply(srv.family ? [] : srv.myInvites)
+    if (fn === 'bc_invite_accept') {
+      if (!srv.myInvites.some((i) => i.family_id === args.p_family_id)) return fail('invite_not_found')
+      srv.family = args.p_family_id
+      srv.myInvites = []
+      return reply({ family_id: srv.family })
+    }
+    if (fn === 'bc_invite_decline') {
+      srv.myInvites = srv.myInvites.filter((i) => i.family_id !== args.p_family_id)
+      return reply(true)
+    }
+    if (fn === 'bc_family_create') {
+      if (!/^[0-9]{4}$/.test(args.p_pin ?? '')) return fail('bad_pin')
+      if (srv.family) return fail('has_family')
+      srv.family = FAMILY
+      return reply({ family_id: FAMILY, profile_id: KID })
+    }
+    const known = !!srv.family
+    if (!known) return fail('no_family')
     switch (fn) {
       case 'bc_pull': {
-        if (!known) return fail('not_found')
         if (srv.pullDelay) await new Promise((r) => setTimeout(r, srv.pullDelay))
         const parent = args.p_token === TOKEN
         const d = structuredClone(srv.data)
@@ -151,10 +174,18 @@ function makeServer() {
         if (args.p_status === 'storniert') srv.data.profiles.find((p) => p.id === d.profile_id).stars_balance += d.cost_stars
         return reply({ ok: true, status: d.status })
       }
-      case 'bc_create':
-        if (args.p_invite !== 'GOOD-INVI-TECO-DE23') return fail('invite_invalid')
-        srv.codes.add(args.p_code)
-        return reply({ family_id: 'f', profile_id: KID })
+      case 'bc_parents':
+        if (args.p_token !== TOKEN) return fail('pin_required')
+        return reply({ parents: [{ user_id: USER.id, email: USER.email, is_me: true, added_at: later }], invites: srv.invites })
+      case 'bc_parent_invite':
+        if (args.p_token !== TOKEN) return fail('pin_required')
+        if (args.p_email === USER.email) return fail('already_parent')
+        srv.invites.push({ email: args.p_email.toLowerCase(), created_at: later, expires_at: later })
+        return reply({ ok: true, email: args.p_email })
+      case 'bc_parent_invite_delete':
+        if (args.p_token !== TOKEN) return fail('pin_required')
+        srv.invites = srv.invites.filter((i) => i.email !== args.p_email)
+        return reply(true)
       case 'bc_answer':
         if (srv.answerDown) { srv.calls.pop(); return route.abort('internetdisconnected') }
         return known ? reply({ ok: true }) : fail('not_found')
@@ -187,6 +218,7 @@ async function open({ size = 'iphone', storage = {}, raw = {}, lang = 'de', them
     const u = route.request().url()
     if (u.startsWith(new URL(BASE).origin + '/')) return route.continue()
     if (u.includes('.supabase.co/rest/v1/rpc/')) return srv.handle(route)
+    if (u.includes('.supabase.co/auth/v1/')) return srv.down ? route.abort('internetdisconnected') : authRoute(route, srv.auth)
     foreign.push(u)
     return route.abort()
   })
@@ -234,7 +266,8 @@ function fakeSpeech(mode) {
 const ls = (page, k) => page.evaluate((k) => localStorage.getItem(k), k)
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 const noHScroll = (page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)
-const connected = { 'braincraft:code': CODE, 'braincraft:profile': KID }
+const connected = signedIn({ 'braincraft:profile': KID })
+const googleBtn = (page, lang = 'de') => page.getByRole('button', { name: lang === 'en' ? 'Sign in with Google' : 'Mit Google anmelden' })
 const answersOf = (srv) => srv.calls.filter((c) => c.fn === 'bc_answer')
 
 // Sperre nach Fehler abwarten (statt fester Zeit; bei hoher Rechnerlast feuert der 1-s-Timer später)
@@ -266,63 +299,148 @@ async function answer(p, how) {
   return { id, note: kind }
 }
 // =========================== 1. Setup ===========================
-console.log('1. Setup')
+console.log('1. Setup (Anmeldung mit Google)')
 {
-  const { ctx, page, srv } = await open()
-  await page.getByText('Ich habe einen Familien-Code').click()
-  await page.locator('input[placeholder^="XXXX"]').fill('ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ')
-  await page.getByRole('button', { name: 'Verbinden' }).click()
-  await page.locator('[role=alert]').waitFor()
-  ok('Setup: falscher Code -> Meldung errCode', (await page.locator('[role=alert]').innerText()).includes('Diesen Familien-Code gibt es nicht'))
-  ok('Setup: falscher Code -> bc_pull mit p_code', srv.calls.at(-1)?.fn === 'bc_pull' && srv.calls.at(-1).args.p_code === 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ')
-  ok('Setup: falscher Code -> nichts gespeichert', (await ls(page, 'braincraft:code')) === null)
-  srv.down = true
-  await page.getByRole('button', { name: 'Verbinden' }).click()
-  await wait(300)
-  ok('Setup: offline -> errOffline', (await page.locator('[role=alert]').innerText()).includes('Keine Verbindung'))
-  srv.down = false
+  const srv = makeServer()
+  srv.family = null
+  const { ctx, page } = await open({ srv })
+  ok('Setup: Google-Knopf sichtbar, kein Familien-Code', (await googleBtn(page).count()) === 1 && !(await page.innerText('body')).includes('Familien-Code'))
+  const gb = await googleBtn(page).evaluate((e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return { h: r.height, bg: cs.backgroundColor, svg: !!e.querySelector('svg path[fill="#4285F4"]') } })
+  ok('Setup: Google-Knopf nach Richtlinie (weiß, farbiges G, ≥ 44 px)', gb.h >= 44 && gb.bg === 'rgb(255, 255, 255)' && gb.svg, JSON.stringify(gb))
   ok('Setup iPhone: kein seitliches Scrollen', await noHScroll(page))
-  await page.screenshot({ path: join(SHOTS, 'setup-code-iphone.png') })
-  await page.getByRole('button', { name: 'Abbrechen' }).click()
+  await page.screenshot({ path: join(SHOTS, 'setup-google-iphone.png') })
+
+  // Abgebrochen bei Google
+  srv.auth.deny = true
+  await googleBtn(page).click()
+  await page.locator('[role=alert]').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('Abgebrochen: freundliche Meldung', (await page.locator('[role=alert]').innerText().catch(() => '')).includes('abgebrochen'))
+  ok('Abgebrochen: Adresse ohne ?error', !page.url().includes('error='), page.url())
+  srv.auth.deny = false
+
+  // Anmelden: Weiterleitung mit redirect_to auf die App, PKCE, zurück mit ?code=
+  srv.auth.log.length = 0
+  await googleBtn(page).click()
+  await page.locator('form.setup-form').waitFor({ timeout: 5000 }).catch(() => {})
+  const authz = srv.auth.log.find((l) => l.includes('/authorize'))
+  const q = new URLSearchParams(authz?.split('?')[1] ?? '')
+  ok('Google: provider=google, redirect_to = App-Adresse, PKCE', q.get('provider') === 'google' && q.get('redirect_to') === BASE && q.get('code_challenge_method')?.toLowerCase() === 's256' && !!q.get('code_challenge'), authz)
+  ok('Google: Code gegen Sitzung getauscht (grant_type=pkce)', srv.auth.log.some((l) => l.includes('/token?grant_type=pkce')), srv.auth.log.join(' | '))
+  ok('Google: Code nicht in der Adresszeile', !page.url().includes('code='), page.url())
+  ok('Google: Sitzung gespeichert (braincraft-auth)', !!(await ls(page, 'braincraft-auth')))
+  ok('Google: danach bc_session', srv.calls.some((c) => c.fn === 'bc_session'))
+  ok('Konto ohne Familie: Formular „Familie anlegen“ und Konto-Zeile mit Adresse', (await page.locator('form.setup-form').count()) === 1 && (await page.locator('.setup .acc-row').innerText()).includes(USER.email))
+  await page.screenshot({ path: join(SHOTS, 'setup-create-iphone.png') })
 
   // Neue Familie
-  await page.getByText('Neu einrichten').click()
   const f = page.locator('form input')
-  await f.nth(0).fill('FALS-CHER-CODE-XXXX')
-  await f.nth(1).fill('Lia')
+  await f.nth(0).fill('Lia')
+  await f.nth(1).fill('12')
   await f.nth(2).fill('12')
-  await f.nth(3).fill('12')
   await page.getByRole('button', { name: 'Familie anlegen' }).click()
   ok('Neu: PIN-Format -> errPinFormat', (await page.locator('[role=alert]').innerText()).includes('4 Ziffern'))
-  ok('Neu: PIN-Format -> kein bc_create', !srv.calls.some((c) => c.fn === 'bc_create'))
-  await f.nth(2).fill('12ab34')
-  ok('Neu: PIN-Feld filtert Nicht-Ziffern', (await f.nth(2).inputValue()) === '1234')
-  await f.nth(3).fill('4321')
+  ok('Neu: PIN-Format -> kein bc_family_create', !srv.calls.some((c) => c.fn === 'bc_family_create'))
+  await f.nth(1).fill('12ab34')
+  ok('Neu: PIN-Feld filtert Nicht-Ziffern', (await f.nth(1).inputValue()) === '1234')
+  await f.nth(2).fill('4321')
   await page.getByRole('button', { name: 'Familie anlegen' }).click()
   ok('Neu: PINs ungleich -> errPinMatch', (await page.locator('[role=alert]').innerText()).includes('stimmen nicht'))
-  await f.nth(3).fill('1234')
-  await f.nth(1).fill('   ')
+  await f.nth(2).fill('1234')
+  await f.nth(0).fill('   ')
   await page.getByRole('button', { name: 'Familie anlegen' }).click()
   ok('Neu: leerer Name -> errName', (await page.locator('[role=alert]').innerText()).includes('Vornamen'))
-  await f.nth(1).fill('Lia')
-  await page.getByRole('button', { name: 'Familie anlegen' }).click()
-  await wait(300)
-  ok('Neu: falsche Einladung -> errInvite', (await page.locator('[role=alert]').innerText()).includes('Einladungscode ist ungültig'))
-  await f.nth(0).fill('GOOD-INVI-TECO-DE23')
+  await f.nth(0).fill('Lia')
+  ok('Neu: Formular ohne seitliches Scrollen', await noHScroll(page))
   srv.calls.length = 0
   await page.getByRole('button', { name: 'Familie anlegen' }).click()
-  await page.locator('.setup-code').waitFor()
-  const shown = (await page.locator('.setup-code').innerText()).trim()
-  const create = srv.calls.find((c) => c.fn === 'bc_create')
-  ok('Neu: bc_create mit Einladung, Name, PIN', create && create.args.p_invite === 'GOOD-INVI-TECO-DE23' && create.args.p_child_name === 'Lia' && create.args.p_pin === '1234', JSON.stringify(create?.args))
-  ok('Neu: angezeigter Code = gesendeter Code', create && create.args.p_code === shown, `${shown} / ${create?.args.p_code}`)
-  ok('Neu: vor „Notiert“ kein bc_pull und kein Code gespeichert', !srv.calls.some((c) => c.fn === 'bc_pull') && (await ls(page, 'braincraft:code')) === null)
-  ok('Neu: Code-Anzeige ohne seitliches Scrollen', await noHScroll(page))
-  await page.screenshot({ path: join(SHOTS, 'setup-show-iphone.png') })
-  await page.getByRole('button', { name: 'Notiert, weiter' }).click()
-  await page.locator('.home').waitFor({ timeout: 3000 }).catch(() => {})
-  ok('Neu: nach „Notiert“ bc_pull mit dem Code', srv.calls.some((c) => c.fn === 'bc_pull' && c.args.p_code === shown))
-  ok('Neu: nach „Notiert“ verbunden (Start sichtbar, Code gespeichert)', (await page.locator('.home').count()) === 1 && JSON.parse(await ls(page, 'braincraft:code')) === shown)
+  await page.locator('.home').waitFor({ timeout: 4000 }).catch(() => {})
+  const create = srv.calls.find((c) => c.fn === 'bc_family_create')
+  ok('Neu: bc_family_create mit Name und PIN (ohne Code)', create && JSON.stringify(create.args) === JSON.stringify({ p_child_name: 'Lia', p_pin: '1234' }), JSON.stringify(create?.args))
+  ok('Neu: danach bc_pull, Start sichtbar, Familie gespeichert', srv.calls.some((c) => c.fn === 'bc_pull') && (await page.locator('.home').count()) === 1 && JSON.parse(await ls(page, 'braincraft:family')) === FAMILY)
+  ok('Neu: kein Familien-Code gespeichert', (await ls(page, 'braincraft:code')) === null)
+  await ctx.close()
+}
+{
+  // Kein Zugang (signup_disabled / Hook): eigene, freundliche Meldung
+  const srv = makeServer()
+  srv.family = null
+  srv.auth.noAccess = true
+  const { ctx, page } = await open({ srv })
+  await googleBtn(page).click()
+  await page.locator('[role=alert]').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('Kein Zugang: „Kein Zugang – bitte von der Familie freischalten lassen.“', (await page.locator('[role=alert]').innerText().catch(() => '')) === 'Kein Zugang – bitte von der Familie freischalten lassen.')
+  ok('Kein Zugang: keine Sitzung, kein bc_session', !(await ls(page, 'braincraft-auth')) && !srv.calls.some((c) => c.fn === 'bc_session'))
+  await ctx.close()
+}
+{
+  // Einladung: nie still annehmen, sichtbar annehmen oder ablehnen (mit Rückfrage)
+  const srv = makeServer()
+  srv.family = null
+  srv.myInvites = [{ family_id: FAMILY, invited_by: 'oma@example.org', created_at: later, expires_at: later }]
+  const { ctx, page } = await open({ srv })
+  await googleBtn(page).click()
+  await page.locator('.setup-invite').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('Einladung: sichtbar mit einladender Adresse und Frage', (await page.locator('.setup-invite').innerText().catch(() => '')).includes('oma@example.org hat dich eingeladen'))
+  ok('Einladung: nicht still angenommen', !srv.calls.some((c) => c.fn === 'bc_invite_accept') && (await page.locator('.home').count()) === 0)
+  const acc = await page.locator('.acc-row').innerText().catch(() => '')
+  ok('Konto-Zeile: Anfangsbuchstabe, Name, E-Mail, „Angemeldet mit Google“', (await page.locator('.acc-row .acc-initial').innerText().catch(() => '')) === 'A' && acc.includes('Alex Test') && acc.includes(USER.email) && acc.includes('Angemeldet mit Google'), acc)
+  ok('Einladung: nur ein gefüllter Hauptknopf', (await page.locator('.setup .btn.primary').count()) === 1)
+  for (const [size] of Object.entries(SIZES)) {
+    for (const theme of ['light', 'dark']) {
+      await page.setViewportSize(SIZES[size])
+      await page.evaluate((th) => document.documentElement.setAttribute('data-theme', th), theme)
+      await wait(100)
+      ok(`Einladung ${size} ${theme}: kein seitliches Scrollen`, await noHScroll(page))
+      await page.screenshot({ path: join(SHOTS, `setup-einladung-${size}-${theme}.png`), fullPage: true })
+    }
+  }
+  await page.setViewportSize(SIZES.iphone)
+  await page.evaluate(() => document.documentElement.removeAttribute('data-theme'))
+  await page.locator('.setup-invite').getByRole('button', { name: 'Ablehnen' }).click()
+  const askD = page.locator('dialog.confirm[open]')
+  await askD.waitFor({ timeout: 2000 }).catch(() => {})
+  ok('Ablehnen: Rückfrage mit rotem Knopf', /rgb\(179, 38, 30\)|rgb\(255, 138, 128\)/.test(await askD.locator('.btn.danger').evaluate((e) => getComputedStyle(e).backgroundColor).catch(() => '')))
+  await page.keyboard.press('Escape')
+  await wait(300)
+  ok('Esc schließt nur das oberste Sheet', (await page.locator('dialog.confirm[open]').count()) === 0 && (await page.locator('.setup-invite').count()) === 1 && !srv.calls.some((c) => c.fn === 'bc_invite_decline'))
+  srv.calls.length = 0
+  await page.locator('.setup-invite').getByRole('button', { name: 'Annehmen' }).click()
+  await page.locator('.home').waitFor({ timeout: 4000 }).catch(() => {})
+  const ia = srv.calls.find((c) => c.fn === 'bc_invite_accept')
+  ok('Annehmen: bc_invite_accept(p_family_id), danach im Spiel', ia && ia.args.p_family_id === FAMILY && (await page.locator('.home').count()) === 1, JSON.stringify(ia?.args))
+  await ctx.close()
+}
+{
+  const srv = makeServer()
+  srv.family = null
+  srv.myInvites = [{ family_id: FAMILY, invited_by: 'oma@example.org', created_at: later, expires_at: later }]
+  const { ctx, page } = await open({ srv })
+  await googleBtn(page).click()
+  await page.locator('.setup-invite').waitFor({ timeout: 5000 }).catch(() => {})
+  await page.locator('.setup-invite').getByRole('button', { name: 'Ablehnen' }).click()
+  await page.locator('dialog.confirm[open] .btn.danger').click()
+  await wait(400)
+  ok('Ablehnen bestätigt: bc_invite_decline, Einladung weg, Formular „Familie anlegen“ bleibt', srv.calls.some((c) => c.fn === 'bc_invite_decline' && c.args.p_family_id === FAMILY) && (await page.locator('.setup-invite').count()) === 0 && (await page.locator('form.setup-form').count()) === 1)
+  await ctx.close()
+}
+{
+  // Angemeldetes Gerät, offline gestartet: Kind sieht nie die Anmeldung
+  const srv = makeServer()
+  srv.down = true
+  const { ctx, page } = await open({ srv, storage: { ...connected, 'braincraft:pull': basePull() } })
+  await page.locator('.home').waitFor({ timeout: 4000 }).catch(() => {})
+  ok('Offline mit Sitzung: Start sichtbar, keine Anmeldung', (await page.locator('.home').count()) === 1 && (await page.locator('.setup').count()) === 0)
+  await ctx.close()
+}
+{
+  // Früher mit Familien-Code verbunden: Stand bleibt, einmal mit Google anmelden
+  const srv = makeServer()
+  const { ctx, page } = await open({ srv, storage: { 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': basePull() } })
+  ok('Alter Code: Hinweis auf neue Anmeldung', (await page.locator('.setup').innerText()).includes('neue Anmeldung'))
+  ok('Alter Code: gelöscht, Stand bleibt', (await ls(page, 'braincraft:code')) === null && !!(await ls(page, 'braincraft:pull')))
+  await googleBtn(page).click()
+  await page.locator('.home').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('Alter Code: nach Google-Anmeldung direkt im Spiel (Familie übernommen)', (await page.locator('.home').count()) === 1 && JSON.parse(await ls(page, 'braincraft:family')) === FAMILY)
   await ctx.close()
 }
 {
@@ -332,9 +450,10 @@ console.log('1. Setup')
   ok('Probe: Banner sichtbar', (await page.locator('.demo-banner').count()) === 1)
   await page.locator('.quickbtn').first().click()
   await page.locator('.arena .a-card').waitFor()
-  await card(page).locator('.g-btn').first().click({ force: true })
+  // Erste Beispielfrage ist zufällig; Blasen-Fragen haben .g-bubble statt .g-btn (sonst Zufallsfehler)
+  await card(page).locator('.g-btn, .g-bubble').first().click({ force: true })
   await wait(1300)
-  await card(page).locator('.g-btn').nth(1).click({ force: true }).catch(() => {})
+  await card(page).locator('.g-btn, .g-bubble').nth(1).click({ force: true }).catch(() => {})
   await wait(300)
   ok('Probe: keine einzige RPC-Anfrage', srv.calls.length === 0, JSON.stringify(srv.calls.map((c) => c.fn)))
   ok('Probe: localStorage braincraft:demo = 1, keine Schlange', (await ls(page, 'braincraft:demo')) === '1' && (await ls(page, 'braincraft:queue')) === null)
@@ -393,9 +512,7 @@ console.log('3. Warteschlange (Ablauf wie nach dem Neuladen: Start-refresh mit l
 console.log('3b. Warteschlange (frisch verbunden über Setup, dann ganze Runde)')
 async function connectViaSetup(opts = {}) {
   const o = await open(opts)
-  await o.page.getByText(opts.lang === 'en' ? 'I have a family code' : 'Ich habe einen Familien-Code').click()
-  await o.page.locator('input[placeholder^="XXXX"]').fill(CODE)
-  await o.page.locator('button[type=submit]').click()
+  await googleBtn(o.page, opts.lang).click()
   await o.page.locator('.home').waitFor()
   return o
 }
@@ -428,7 +545,7 @@ async function playRound(page, plan) {
   const exp = normals.map((s) => ({ q: s.id, c: s.how !== 'reveal', f: s.how === 'right' }))
   const got = a.map((x) => ({ q: x.args.p_question_id, c: x.args.p_correct, f: x.args.p_first_try }))
   ok('Runde: Reihenfolge und correct = !revealed, first_try', JSON.stringify(exp) === JSON.stringify(got), `erwartet ${JSON.stringify(exp)} / tatsächlich ${JSON.stringify(got)}`)
-  ok('Runde: mode solo, gleiche round_id, Kind, Code', a.every((x) => x.args.p_mode === 'solo' && x.args.p_round_id === a[0].args.p_round_id && x.args.p_profile_id === KID && x.args.p_code === CODE), JSON.stringify(a[0]?.args))
+  ok('Runde: mode solo, gleiche round_id, Kind, kein Code', a.every((x) => x.args.p_mode === 'solo' && x.args.p_round_id === a[0].args.p_round_id && x.args.p_profile_id === KID && !('p_code' in x.args)), JSON.stringify(a[0]?.args))
   ok('Runde: answer_id eindeutig', new Set(a.map((x) => x.args.p_answer_id)).size === a.length)
   const rf = srv.calls.filter((c) => c.fn === 'bc_round_finish')
   ok('Runde: genau 1× bc_round_finish mit round_id', rf.length === 1 && rf[0].args.p_round_id === a[0]?.args.p_round_id && rf[0].args.p_profile_id === KID, JSON.stringify(rf))
@@ -571,9 +688,40 @@ async function pin(page, digits) {
   const all = srv.calls.find((c) => c.fn === 'bc_question_set_status')
   ok('Alle freigeben: p_ids [d1,d4]', all && JSON.stringify([...all.args.p_ids].sort()) === '["d1","d4"]', JSON.stringify(all?.args))
   ok('Alle freigeben: leerer Zustand', (await page.locator('.bc-empty', { hasText: 'Keine neuen Fragen' }).count()) === 1 && (await page.locator('.approve').count()) === 0)
-  // Familien-Code anzeigen
-  await page.getByRole('button', { name: 'Familien-Code anzeigen' }).click()
-  ok('Cockpit: Code anzeigen', (await page.locator('.parents').innerText()).includes(CODE))
+  // Eltern der Familie und Gerät
+  await page.locator('.family .fam-parents li').first().waitFor({ timeout: 3000 }).catch(() => {})
+  ok('Cockpit: Eltern-Liste mit eigenem Konto („du“)', (await page.locator('.family').innerText()).includes(USER.email) && (await page.locator('.family .fam-parents li').first().innerText()).includes('du'))
+  ok('Cockpit: Konto-Zeile unter „Dieses Gerät“', (await page.locator('.parents .acc-row').innerText()).includes(USER.email))
+  ok('Cockpit: kein Familien-Code mehr', !(await page.locator('.parents').innerText()).includes('Familien-Code'))
+  const inv = page.locator('.family input[type=email]')
+  await inv.fill('keine-adresse')
+  await page.locator('.family').getByRole('button', { name: 'Einladen' }).click()
+  ok('Einladen: ungültige Adresse -> Meldung, kein RPC', (await page.locator('.family [role=alert]').innerText()).includes('gültige E-Mail') && !srv.calls.some((c) => c.fn === 'bc_parent_invite'))
+  await inv.fill(' oma.test@gmail.com ')
+  await page.locator('.family').getByRole('button', { name: 'Einladen' }).click()
+  await wait(400)
+  const ic = srv.calls.find((c) => c.fn === 'bc_parent_invite')
+  ok('Einladen: bc_parent_invite(p_token, p_email) mit vereinheitlichter Gmail-Adresse', ic && ic.args.p_token === TOKEN && ic.args.p_email === 'omatest@gmail.com', JSON.stringify(ic?.args))
+  ok('Einladen: Einladung in der Liste, Feld leer', (await page.locator('.family').innerText()).includes('omatest@gmail.com') && (await inv.inputValue()) === '')
+  await page.locator('.family li', { hasText: 'omatest@gmail.com' }).getByRole('button', { name: 'Zurückziehen' }).click()
+  const sheetDanger = page.locator('.sheet .btn.danger, dialog[open] .btn.danger').first()
+  await sheetDanger.waitFor({ timeout: 2000 }).catch(() => {})
+  ok('Zurückziehen: Rückfrage mit rotem Knopf', /rgb\(179, 38, 30\)|rgb\(255, 138, 128\)/.test(await sheetDanger.evaluate((e) => getComputedStyle(e).backgroundColor).catch(() => '')))
+  await sheetDanger.click()
+  await wait(400)
+  ok('Zurückziehen: bc_parent_invite_delete, Liste ohne Einladung', srv.calls.some((c) => c.fn === 'bc_parent_invite_delete' && c.args.p_email === 'omatest@gmail.com') && !(await page.locator('.family').innerText()).includes('omatest@gmail.com'))
+  for (const [size] of Object.entries(SIZES)) {
+    for (const theme of ['light', 'dark']) {
+      await page.setViewportSize(SIZES[size])
+      await page.evaluate((th) => document.documentElement.setAttribute('data-theme', th), theme)
+      await wait(100)
+      await page.locator('.family').scrollIntoViewIfNeeded()
+      ok(`Cockpit Eltern ${size} ${theme}: kein seitliches Scrollen`, await noHScroll(page))
+      await page.locator('.family').screenshot({ path: join(SHOTS, `cockpit-eltern-${size}-${theme}.png`) })
+    }
+  }
+  await page.setViewportSize(SIZES.iphone)
+  await page.evaluate(() => document.documentElement.removeAttribute('data-theme'))
   // Sperren
   srv.calls.length = 0
   await page.getByRole('button', { name: 'Sperren', exact: true }).click()
@@ -583,32 +731,48 @@ async function pin(page, digits) {
   ok('Sperren: zurück zur Startseite', (await page.locator('.home').count()) === 1)
   await openCockpit(page)
   ok('Sperren: erneut PIN nötig', (await page.locator('.pin').count()) === 1)
-  // Gerät trennen
+  // Gerät abmelden: erst „Nur abmelden“ (Stand bleibt), wieder anmelden, dann mit Löschen
   await pin(page, '2468')
   await page.locator('.approve, .bc-empty').first().waitFor({ timeout: 3000 })
-  // Schlange füllen (offline), damit „queue“ geprüft werden kann
-  await page.evaluate(() => localStorage.setItem('braincraft:queue', JSON.stringify([{ kind: 'round', roundId: 'x', profileId: 'y' }])))
-  await page.getByText('Gerät trennen').click()
-  ok('Trennen: Rückfrage-Dialog offen', (await page.locator('dialog.confirm[open]').count()) === 1)
+  await page.getByRole('button', { name: 'Gerät abmelden', exact: true }).click()
+  ok('Abmelden: Rückfrage-Dialog offen', (await page.locator('dialog.confirm[open]').count()) === 1)
   const danger = page.locator('dialog.confirm[open] .btn.danger')
   const bg = await danger.evaluate((e) => getComputedStyle(e).backgroundColor)
-  ok('Trennen: roter Knopf', /rgb\(179, 38, 30\)|rgb\(255, 138, 128\)/.test(bg), bg)
+  ok('Abmelden: roter Knopf „Abmelden und Daten löschen“', /rgb\(179, 38, 30\)|rgb\(255, 138, 128\)/.test(bg) && (await danger.innerText()).includes('Daten löschen'), bg)
   await page.locator('dialog.confirm[open]').getByRole('button', { name: 'Abbrechen' }).click()
-  ok('Trennen: Abbrechen lässt verbunden', (await ls(page, 'braincraft:code')) !== null)
-  await page.getByText('Gerät trennen').click()
+  ok('Abmelden: Abbrechen lässt angemeldet', !!(await ls(page, 'braincraft-auth')) && (await page.locator('.parents').count()) === 1)
+  await page.getByRole('button', { name: 'Gerät abmelden', exact: true }).click()
+  srv.auth.log.length = 0
+  // Abmelden ohne Netz: signOut scheitert, die Sitzung wird trotzdem vom Gerät entfernt
+  srv.auth.logoutDown = true
+  await page.locator('dialog.confirm[open]').getByRole('button', { name: 'Nur abmelden' }).click()
+  await page.locator('.setup').waitFor({ timeout: 3000 }).catch(() => {})
+  srv.auth.logoutDown = false
+  ok('Nur abmelden (offline): Sitzung weg, Stand und Familie bleiben', !(await ls(page, 'braincraft-auth')) && !!(await ls(page, 'braincraft:pull')) && !!(await ls(page, 'braincraft:family')))
+  ok('Nur abmelden: Anmeldung mit freundlichem Hinweis fürs Kind', (await page.locator('.setup').innerText()).includes('Mama oder Papa') && (await googleBtn(page).count()) === 1)
+  await googleBtn(page).click()
+  await page.locator('.home').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('Wieder angemeldet: direkt im Spiel', (await page.locator('.home').count()) === 1)
+  await openCockpit(page)
+  await pin(page, '2468')
+  await page.locator('.approve, .bc-empty').first().waitFor({ timeout: 3000 })
+  // Schlange füllen, damit „queue“ und der Hinweis auf ungesendete Antworten geprüft werden können
+  await page.evaluate(() => localStorage.setItem('braincraft:queue', JSON.stringify([{ kind: 'round', roundId: 'x', profileId: 'y' }])))
+  await page.getByRole('button', { name: 'Gerät abmelden', exact: true }).click()
   await danger.click()
-  await wait(600)
-  const keys2 = ['braincraft:code', 'braincraft:profile', 'braincraft:pull', 'braincraft:name']
+  await wait(700)
+  const keys2 = ['braincraft:family', 'braincraft:profile', 'braincraft:pull', 'braincraft:name', 'braincraft-auth']
   const vals = {}
   for (const k of keys2) vals[k] = await ls(page, k)
   vals['braincraft:queue'] = await ls(page, 'braincraft:queue')
-  ok('Trennen: code, profile, pull, Name gelöscht', keys2.every((k) => !vals[k]), JSON.stringify(vals).slice(0, 300))
-  ok('Trennen: Schlange leer', !vals['braincraft:queue'] || vals['braincraft:queue'] === '[]', vals['braincraft:queue'])
-  ok('Trennen: Setup sichtbar', (await page.locator('.setup').count()) === 1)
+  ok('Abmelden + Löschen: Sitzung, Familie, Kind, Stand, Name gelöscht', keys2.every((k) => !vals[k]), JSON.stringify(vals).slice(0, 300))
+  ok('Abmelden + Löschen: Schlange leer', !vals['braincraft:queue'] || vals['braincraft:queue'] === '[]', vals['braincraft:queue'])
+  ok('Abmelden + Löschen: Setup sichtbar', (await page.locator('.setup').count()) === 1)
+  ok('Abmelden: nur dieses Gerät (scope=local)', srv.auth.log.every((l) => !l.includes('/logout') || l.includes('scope=local')), srv.auth.log.join(' | '))
   await ctx.close()
 }
 {
-  // Trennen, während ein bc_pull noch läuft (langsames Netz)
+  // Abmelden, während ein bc_pull noch läuft (langsames Netz)
   const { ctx, page, srv } = await connectViaSetup()
   await openCockpit(page)
   await pin(page, '2468')
@@ -616,42 +780,43 @@ async function pin(page, digits) {
   srv.pullDelay = 1500
   await page.evaluate(() => window.dispatchEvent(new Event('online')))
   await wait(100)
-  await page.getByText('Gerät trennen').click()
+  await page.getByRole('button', { name: 'Gerät abmelden', exact: true }).click()
   await page.locator('dialog.confirm[open] .btn.danger').click()
   await wait(2200)
   const pull = await ls(page, 'braincraft:pull')
   const name = await ls(page, 'braincraft:name')
-  ok('Trennen bei laufendem bc_pull: pull bleibt gelöscht', !pull, (pull ?? '').slice(0, 60))
-  ok('Trennen bei laufendem bc_pull: Name bleibt gelöscht', !name, String(name))
+  ok('Abmelden bei laufendem bc_pull: pull bleibt gelöscht', !pull, (pull ?? '').slice(0, 60))
+  ok('Abmelden bei laufendem bc_pull: Name bleibt gelöscht', !name, String(name))
   await ctx.close()
 }
 
 // =========================== 5. Englisch ===========================
 console.log('5. Englisch')
-const GERMAN = ['Arbeit', 'Morgen', 'Heute', 'Noch keine', 'sicher', 'Familien', 'Verbinden', 'Abbrechen', 'PIN falsch', 'Gesperrt', 'Freigeben', 'Ausblenden', 'Sperren', 'Gerät', 'Lösung', 'Antwort', 'Einladung', 'Ziffern']
+const GERMAN = ['Arbeit', 'Morgen', 'Heute', 'Noch keine', 'sicher', 'Familien', 'Verbinden', 'Abbrechen', 'PIN falsch', 'Gesperrt', 'Freigeben', 'Ausblenden', 'Sperren', 'Gerät', 'Lösung', 'Antwort', 'Einladung', 'Ziffern', 'Anmeld', 'Abmeld', 'Eltern', 'Einladen', 'Zurückziehen', 'Mit Google']
 const germanIn = (txt) => GERMAN.filter((w) => txt.includes(w) && !/(Normal|Vorabend|Heute|Kurz|Entwurf)-Arbeit|Frage [a-z0-9]+\?/.test(w))
 const stripData = (s) => s.replace(/(Normal|Vorabend|Heute|Kurz|Entwurf|Archiv|Ben)-Arbeit/g, '').replace(/Frage [a-z0-9]+\?/g, '')
 {
-  const { ctx, page, srv } = await open({ lang: 'en' })
+  const srv = makeServer()
+  srv.family = null
+  const { ctx, page } = await open({ lang: 'en', srv })
   ok('EN Setup: html lang en', (await page.evaluate(() => document.documentElement.lang)) === 'en')
   ok('EN Setup: keine deutschen Wörter', germanIn(await page.innerText('body')).length === 0, germanIn(await page.innerText('body')).join(','))
-  await page.getByText('I have a family code').click()
-  await page.locator('input[placeholder^="XXXX"]').fill('ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ')
-  await page.locator('button[type=submit]').click()
-  await page.locator('[role=alert]').waitFor()
-  ok('EN Setup: Fehlermeldung englisch', (await page.locator('[role=alert]').innerText()).includes('does not exist'))
-  await page.locator('button.plain').click()
-  await page.getByText(/^Set up/).first().click().catch(() => {})
-  await page.locator('form').waitFor({ timeout: 2000 }).catch(() => {})
+  ok('EN Setup: „Sign in with Google“', (await googleBtn(page, 'en').count()) === 1)
+  srv.auth.deny = true
+  await googleBtn(page, 'en').click()
+  await page.locator('[role=alert]').waitFor({ timeout: 5000 }).catch(() => {})
+  ok('EN Abgebrochen: Meldung englisch', (await page.locator('[role=alert]').innerText().catch(() => '')).includes('cancelled'))
+  srv.auth.deny = false
+  await googleBtn(page, 'en').click()
+  await page.locator('form.setup-form').waitFor({ timeout: 5000 }).catch(() => {})
   if (await page.locator('form').count()) {
     const f = page.locator('form input')
-    await f.nth(0).fill('FALS-CHER-CODE-XXXX'); await f.nth(1).fill('Lia'); await f.nth(2).fill('12'); await f.nth(3).fill('12')
+    await f.nth(0).fill('Lia'); await f.nth(1).fill('12'); await f.nth(2).fill('12')
     await page.locator('button[type=submit]').click()
     ok('EN Neu: PIN-Fehler englisch', (await page.locator('[role=alert]').innerText()).includes('4 digits'))
     ok('EN Neu: keine deutschen Wörter', germanIn(await page.innerText('body')).length === 0, germanIn(await page.innerText('body')).join(','))
-  } else ok('EN Neu: Formular gefunden', false, 'Knopf „Set up…“ nicht gefunden')
+  } else ok('EN Neu: Formular gefunden', false, 'Formular „Create family“ nicht gefunden')
   await ctx.close()
-  void srv
 }
 {
   const o = await connectViaSetup({ lang: 'en' })
@@ -674,9 +839,9 @@ const stripData = (s) => s.replace(/(Normal|Vorabend|Heute|Kurz|Entwurf|Archiv|B
   await page.locator('.approve').waitFor({ timeout: 3000 })
   const cb = stripData(await page.innerText('body'))
   ok('EN Cockpit: keine deutschen Wörter', germanIn(cb).length === 0, germanIn(cb).join(','))
-  await page.getByText('Disconnect device').click()
+  await page.getByRole('button', { name: 'Sign out device', exact: true }).click()
   const db = await page.locator('dialog.confirm[open]').innerText()
-  ok('EN Trennen: Rückfrage englisch', germanIn(db).length === 0 && db.includes('Really disconnect'), db)
+  ok('EN Abmelden: Rückfrage englisch', germanIn(db).length === 0 && db.includes('Sign out this device'), db)
   await ctx.close()
 }
 
@@ -778,7 +943,7 @@ async function tryRedeem(page, title) {
   const order = srv.calls.map((c) => c.fn)
   ok('Einlösen: bc_answer vor bc_redeem, danach bc_pull', order.indexOf('bc_answer') > -1 && order.indexOf('bc_answer') < order.indexOf('bc_redeem') && order.lastIndexOf('bc_pull') > order.indexOf('bc_redeem'), order.join(','))
   const rd = redeemsOf(srv)[0]?.args ?? {}
-  ok('Einlösen: RPC-Argumente p_code, p_redemption_id (UUID), p_profile_id, p_reward_id', JSON.stringify(Object.keys(rd).sort()) === JSON.stringify(['p_code', 'p_profile_id', 'p_redemption_id', 'p_reward_id']) && rd.p_code === CODE && rd.p_profile_id === KID && rd.p_reward_id === RW(1) && UUID.test(rd.p_redemption_id), JSON.stringify(rd))
+  ok('Einlösen: RPC-Argumente p_redemption_id (UUID), p_profile_id, p_reward_id', JSON.stringify(Object.keys(rd).sort()) === JSON.stringify(['p_profile_id', 'p_redemption_id', 'p_reward_id']) && rd.p_profile_id === KID && rd.p_reward_id === RW(1) && UUID.test(rd.p_redemption_id), JSON.stringify(rd))
   ok('Einlösen: Gutschein-Sheet mit Titel', (await page.locator('.shop-voucher b').innerText().catch(() => '')).trim() === 'Ein Eis')
   await page.screenshot({ path: join(SHOTS, 'shop-gutschein-iphone.png') })
   await page.getByRole('button', { name: 'Super!' }).click()
@@ -981,7 +1146,7 @@ async function unlock(page) {
   await page.locator('.parents .vouchers li', { hasText: 'Alter Gutschein' }).getByRole('button', { name: 'Erledigt' }).click()
   await wait(400)
   const rs = callsOf(srv, 'bc_redemption_resolve')[0]?.args ?? {}
-  ok('Erledigt: bc_redemption_resolve(p_code, p_token, p_id, erledigt)', JSON.stringify(Object.keys(rs).sort()) === '["p_code","p_id","p_status","p_token"]' && rs.p_id === VC(1) && rs.p_status === 'erledigt' && rs.p_token === TOKEN && rs.p_code === CODE, JSON.stringify(rs))
+  ok('Erledigt: bc_redemption_resolve(p_token, p_id, erledigt)', JSON.stringify(Object.keys(rs).sort()) === '["p_id","p_status","p_token"]' && rs.p_id === VC(1) && rs.p_status === 'erledigt' && rs.p_token === TOKEN, JSON.stringify(rs))
   ok('Erledigt: danach bc_pull, Gutschein weg', srv.calls.at(-1)?.fn === 'bc_pull' && (await page.locator('.parents .vouchers li', { hasText: 'Alter Gutschein' }).count()) === 0)
 
   // Stornieren mit roter Rückfrage
@@ -1042,7 +1207,7 @@ async function unlock(page) {
   await save.click()
   await wait(400)
   const sv = callsOf(srv, 'bc_reward_save')[0]?.args ?? {}
-  ok('Neu: bc_reward_save mit allen 8 Argumenten', JSON.stringify(Object.keys(sv).sort()) === '["p_code","p_cost_stars","p_icon","p_id","p_is_active","p_profile_id","p_title","p_token"]', JSON.stringify(sv))
+  ok('Neu: bc_reward_save mit allen 7 Argumenten', JSON.stringify(Object.keys(sv).sort()) === '["p_cost_stars","p_icon","p_id","p_is_active","p_profile_id","p_title","p_token"]', JSON.stringify(sv))
   ok('Neu: Werte (id null, Ben, getrimmt, film, 300 als Zahl, aktiv)', sv.p_id === null && sv.p_profile_id === KID2 && sv.p_title === 'Zoo-Besuch' && sv.p_icon === 'film' && sv.p_cost_stars === 300 && sv.p_is_active === true && sv.p_token === TOKEN, JSON.stringify(sv))
   ok('Neu: Sheet zu, Zeile da', (await formSheet(page).count()) === 0 && (await page.locator('.parents .list.rewards .row', { hasText: 'Zoo-Besuch' }).count()) === 1)
 
@@ -1073,7 +1238,7 @@ async function unlock(page) {
   await formSheet(page).getByRole('button', { name: 'Löschen', exact: true }).click()
   await wait(400)
   const dl = callsOf(srv, 'bc_reward_delete')[0]?.args ?? {}
-  ok('Löschen: bc_reward_delete(p_code, p_token, p_id)', JSON.stringify(Object.keys(dl).sort()) === '["p_code","p_id","p_token"]' && dl.p_id === RW(3) && dl.p_token === TOKEN, JSON.stringify(dl))
+  ok('Löschen: bc_reward_delete(p_token, p_id)', JSON.stringify(Object.keys(dl).sort()) === '["p_id","p_token"]' && dl.p_id === RW(3) && dl.p_token === TOKEN, JSON.stringify(dl))
   ok('Löschen: Zeile weg, Sheets zu', (await page.locator('.parents .list.rewards .row', { hasText: 'Lia-Buch' }).count()) === 0 && (await formSheet(page).count()) === 0)
 
   // Höchstzahl

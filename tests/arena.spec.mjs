@@ -27,6 +27,16 @@ mkdirSync(SHOTS, { recursive: true })
 
 const SIZES = { iphone: { width: 390, height: 844 }, ipad: { width: 820, height: 1180 }, desktop: { width: 1440, height: 900 } }
 const LOCK = 1150
+// Sperre nach Fehler abwarten: mindestens LOCK, dann bis die Spielknöpfe wieder frei sind (bei hoher
+// Rechnerlast feuert der 1-s-Timer später; sonst landet der nächste Tipp noch in der Sperre)
+async function waitUnlocked(p) {
+  await p.waitForTimeout(LOCK)
+  for (let k = 0; k < 60; k++) {
+    const free = await p.locator('.arena .a-card button:not([disabled]):not(.a-say)').count().catch(() => 1)
+    if (free > 0) return
+    await p.waitForTimeout(50)
+  }
+}
 
 // ---------- Ergebnis-Sammlung ----------
 const results = []
@@ -157,10 +167,14 @@ async function checkMistakeHint(p, id, tag, opts = {}) {
     const st = await p.evaluate(() => ({ chosen: document.querySelectorAll('.arena .a-card .sel, .arena .a-card .ok, .arena .a-card .popped, .arena .a-card .mine').length }))
     ok(`${tag}: Tippen während der Sperre ignoriert`, !(await phaseSolved(p)) && (await msg(p)).includes('Kurz durchatmen') && st.chosen === 0, `markiert ${st.chosen}`)
   }
-  await p.waitForTimeout(LOCK)
+  await waitUnlocked(p)
   const after = await card(p).locator('button:not([disabled])').count()
   ok(`${tag}: nach 1 s wieder frei`, after > 0, `frei: ${after}`)
-  if (MULTI.has(d.type) && d.type !== 'bub') ok(`${tag}: flash nach 1 s weg`, (await card(p).locator('.flash').count()) === 0)
+  if (MULTI.has(d.type) && d.type !== 'bub') {
+    // Leuchten endet mit demselben Timer wie die Sperre; unter Last kurz nachwarten
+    for (let k = 0; k < 20 && (await card(p).locator('.flash').count()) > 0; k++) await p.waitForTimeout(50)
+    ok(`${tag}: flash nach 1 s weg`, (await card(p).locator('.flash').count()) === 0)
+  }
 }
 
 // Prüft aufgedeckte Lösung
@@ -257,7 +271,7 @@ async function playQuestion(p, id, scenario, tag, kind) {
       await wrongAt(p, id, 0); await checkMistakeHint(p, id, tag)
       await wrongAt(p, id, 1)
       ok(`${tag}: Blasen nach 2 Fehlern (versch. Teile) noch nicht aufgedeckt`, !(await phaseSolved(p)))
-      await p.waitForTimeout(LOCK)
+      await waitUnlocked(p)
       await solveRest(p, id)
       ok(`${tag}: Blasen danach gelöst → „Geschafft“`, (await msg(p)).startsWith('Geschafft'))
       return { firstTry: false, revealed: false }
@@ -475,7 +489,7 @@ try {
     const anim = () => p.locator('.a-card').evaluate((e) => e.getAnimations().filter((a) => a.animationName.startsWith('bc-shake')).length)
     await wrongAt(p, id, 0)
     const a1 = await anim()
-    await p.waitForTimeout(LOCK)
+    await waitUnlocked(p)
     await wrongAt(p, id, 1)
     const a2 = await anim()
     ok(`Wackeln beim 1. Fehler (${id})`, a1 === 1, `${a1}`)
@@ -510,10 +524,10 @@ try {
       if (idx < 3) {
         await wrongAt(p, id, 0).catch(() => {})
         ;(await uiTexts()).forEach((t) => { if (GERMAN.test(t)) bad.add(t) })
-        await p.waitForTimeout(LOCK)
+        await waitUnlocked(p)
         await wrongAt(p, id, 0).catch(() => {})
-        if (!(await phaseSolved(p))) { await p.waitForTimeout(LOCK); await wrongAt(p, id, 1).catch(() => {}) }
-        if (!(await phaseSolved(p))) { await p.waitForTimeout(LOCK); await solveRest(p, id) }
+        if (!(await phaseSolved(p))) { await waitUnlocked(p); await wrongAt(p, id, 1).catch(() => {}) }
+        if (!(await phaseSolved(p))) { await waitUnlocked(p); await solveRest(p, id) }
       } else await solveRest(p, id)
       ;(await uiTexts()).forEach((t) => { if (GERMAN.test(t)) bad.add(t) })
       await click(p.locator('.a-next'))

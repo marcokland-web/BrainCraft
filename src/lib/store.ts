@@ -1,14 +1,16 @@
 import { useSyncExternalStore } from 'react'
 import { ApiError, rpc } from './api'
+import { normEmail } from './email'
 import { setPref } from './prefs'
 import { STARS_DAILY_RULE } from './session'
 import type { Exam, Progress, Question } from './types'
 
 // Familien-Stand aus bc_pull, lokal zwischengespeichert (offline spielbar).
 // Antworten gehen erst in eine Warteschlange und werden dann mit fester ID gesendet (doppelt senden schadet nicht).
-// Familien-Code und Stand liegen nur auf diesem Gerät; das Eltern-Token nur im Speicher (14 Minuten,
-// knapp unter der Gültigkeit auf dem Server). Eltern-Inhalte (Entwürfe mit Lösungen, Scan-Aufträge)
-// werden nie gespeichert, nur im Speicher gehalten (Siggi N2).
+// Welche Familie: ergibt sich auf dem Server aus der Google-Sitzung des Geräts (auth.uid(), Migration 007);
+// gemerkt wird nur ihre ID, um einen Wechsel des Kontos zu erkennen. Stand und Warteschlange liegen nur auf
+// diesem Gerät; das Eltern-Token nur im Speicher (14 Minuten, knapp unter der Gültigkeit auf dem Server).
+// Eltern-Inhalte (Entwürfe mit Lösungen, Scan-Aufträge, Eltern-Liste) werden nie gespeichert (Siggi N2).
 
 export interface Profile {
   id: string
@@ -65,6 +67,8 @@ export interface InventoryRow {
   unlocked_at: string
 }
 export interface Pull {
+  // ab Migration 007
+  family_id?: string
   today: string
   parent: boolean
   profiles: Profile[]
@@ -89,8 +93,25 @@ type Queued =
   | { kind: 'seen'; unitId: string; profileId: string }
   | { kind: 'boss'; examId: string; profileId: string }
 
+export interface MyInvite {
+  family_id: string
+  invited_by: string | null
+  created_at: string
+  expires_at: string
+}
+
+// Anmeldung des Geräts: unknown = noch nicht geprüft (Start), signed_in / signed_out laut Google-Sitzung
+export type AuthStatus = 'unknown' | 'signed_in' | 'signed_out'
+
 interface State {
-  code: string | null
+  family: string | null
+  auth: AuthStatus
+  // Angemeldet, aber noch keine Familie: Eltern legen eine an (oder wurden mit anderer Adresse eingeladen)
+  needsFamily: boolean
+  // Gerät war mit dem früheren Familien-Code verbunden: einmal mit Google anmelden, Stand bleibt
+  legacy: boolean
+  // Offene Einladungen an das angemeldete Konto (nur ohne Familie, nur im Speicher); Annehmen nur sichtbar
+  invites: MyInvite[]
   profileId: string | null
   pull: Pull | null
   queue: Queued[]
@@ -99,7 +120,7 @@ interface State {
   parent: { token: string; until: number } | null
 }
 
-const K = { code: 'braincraft:code', profile: 'braincraft:profile', pull: 'braincraft:pull', queue: 'braincraft:queue', bossLocked: 'braincraft:bosslocked' }
+const K = { family: 'braincraft:family', legacyCode: 'braincraft:code', profile: 'braincraft:profile', pull: 'braincraft:pull', queue: 'braincraft:queue', bossLocked: 'braincraft:bosslocked' }
 
 function read<T>(key: string, fallback: T): T {
   try {
@@ -130,8 +151,17 @@ function childView(pull: Pull): Pull {
   }
 }
 
+// Früherer Familien-Code: nicht mehr nötig (und nicht mehr gültig, sobald 008 eingespielt ist), daher löschen.
+// Stand, Kind und wartende Antworten bleiben, bis die Eltern das Gerät mit Google anmelden.
+const legacy = read<string | null>(K.legacyCode, null) !== null
+if (legacy) write(K.legacyCode, null)
+
 let state: State = {
-  code: read<string | null>(K.code, null),
+  family: read<string | null>(K.family, null),
+  auth: 'unknown',
+  needsFamily: false,
+  invites: [],
+  legacy: legacy || (read<string | null>(K.family, null) === null && read<Pull | null>(K.pull, null) !== null),
   profileId: read<string | null>(K.profile, null),
   pull: read<Pull | null>(K.pull, null),
   queue: read<Queued[]>(K.queue, []),
@@ -143,7 +173,7 @@ const listeners = new Set<() => void>()
 
 function set(patch: Partial<State>) {
   state = { ...state, ...patch }
-  if ('code' in patch) write(K.code, state.code)
+  if ('family' in patch) write(K.family, state.family)
   if ('profileId' in patch) write(K.profile, state.profileId)
   if ('pull' in patch) write(K.pull, state.pull && childView(state.pull))
   if ('queue' in patch) write(K.queue, state.queue)
@@ -162,44 +192,97 @@ export function useStore(): State {
 
 const token = () => (state.parent && state.parent.until > Date.now() ? state.parent.token : null)
 
-// ---------- Verbinden und Einrichten ----------
+// ---------- Anmelden und Einrichten ----------
 
 function applyPull(pull: Pull) {
   const profileId = pull.profiles.some((p) => p.id === state.profileId) ? state.profileId : (pull.profiles[0]?.id ?? null)
-  set({ pull, profileId, offline: false })
+  // Antworten für Kinder, die es in dieser Familie nicht gibt (z. B. altes Gerät), nie senden
+  const ids = new Set(pull.profiles.map((p) => p.id))
+  const queue = state.queue.filter((q) => ids.has(q.profileId))
+  set({ pull, profileId, offline: false, legacy: false, ...(queue.length !== state.queue.length ? { queue } : {}) })
   const kid = pull.profiles.find((p) => p.id === profileId)
   if (kid) setPref('name', kid.child_name)
 }
 
-export async function connect(code: string) {
-  const pull = await rpc<Pull>('bc_pull', { p_code: code, p_token: null })
-  set({ code })
-  applyPull(pull)
-}
-
-// 20 Zeichen ohne verwechselbare Zeichen, in Vierergruppen
-export function newFamilyCode() {
-  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-  // Nur Bytes unter 248 (= 8 × 31) verwenden, damit jedes Zeichen gleich wahrscheinlich ist (Siggi N7)
-  let raw = ''
-  while (raw.length < 20) {
-    for (const b of crypto.getRandomValues(new Uint8Array(32))) {
-      if (b < 248 && raw.length < 20) raw += abc[b % abc.length]
-    }
-  }
-  return raw.match(/.{4}/g)!.join('-')
-}
-
-export async function createFamily(invite: string, childName: string, pin: string) {
-  const code = newFamilyCode()
-  await rpc('bc_create', { p_invite: invite, p_code: code, p_child_name: childName, p_pin: pin })
-  // Verbunden wird erst, wenn die Eltern den Code notiert haben (Setup zeigt ihn einmal an)
-  return code
-}
-
-export function disconnect() {
-  set({ code: null, profileId: null, pull: null, queue: [], parent: null })
+// Alles Familiäre von diesem Gerät entfernen (nicht die Einstellungen)
+function wipe() {
+  set({ family: null, profileId: null, pull: null, queue: [], parent: null, legacy: false })
   setPref('name', '')
+}
+
+// Familie des angemeldeten Kontos übernehmen; anderes Konto als vorher: alten Stand verwerfen
+function adopt(familyId: string) {
+  if (state.family && state.family !== familyId) wipe()
+  set({ family: familyId, needsFamily: false, invites: [] })
+}
+
+// Von auth.ts nach dem Start und bei jeder An- oder Abmeldung aufgerufen
+export function authChanged(user: { id: string; email: string } | null) {
+  if (!user) {
+    set({ auth: 'signed_out', needsFamily: false, invites: [], parent: null })
+    return
+  }
+  set({ auth: 'signed_in' })
+  void linkSession().catch(() => undefined)
+}
+
+let linking: Promise<void> | null = null
+
+// Nach der Anmeldung: Familie des Kontos erfragen (löst dabei eine Einladung für die Gmail-Adresse ein)
+export function linkSession(): Promise<void> {
+  if (linking) return linking
+  const p = (async () => {
+    try {
+      const r = await rpc<{ family_id: string | null }>('bc_session', {})
+      if (state.auth !== 'signed_in') return
+      if (r.family_id) {
+        adopt(r.family_id)
+        await refresh()
+      } else {
+        // Konto hat (nicht mehr) eine Familie: gespeicherten Stand nicht weiter zeigen
+        if (state.family) wipe()
+        // Einladungen nur anzeigen; angenommen wird erst nach sichtbarer Rückfrage (acceptInvite)
+        const invites = await rpc<MyInvite[]>('bc_my_invites', {}).catch(() => [] as MyInvite[])
+        if (state.auth !== 'signed_in') return
+        set({ needsFamily: true, invites: Array.isArray(invites) ? invites : [] })
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
+      else throw e
+    }
+  })()
+  linking = p
+  void p.finally(() => {
+    if (linking === p) linking = null
+  })
+  return p
+}
+
+// Einladung in eine bestehende Familie annehmen (nach Tipp auf „Annehmen“) oder ablehnen
+export async function acceptInvite(familyId: string) {
+  const r = await rpc<{ family_id: string }>('bc_invite_accept', { p_family_id: familyId })
+  adopt(r.family_id)
+  await refresh()
+}
+
+export async function declineInvite(familyId: string) {
+  await rpc('bc_invite_decline', { p_family_id: familyId })
+  set({ invites: state.invites.filter((i) => i.family_id !== familyId) })
+}
+
+// Erste Einrichtung: das angemeldete Konto bekommt eine neue Familie mit erstem Kind und Eltern-PIN
+export async function createFamily(childName: string, pin: string) {
+  const r = await rpc<{ family_id: string; profile_id: string }>('bc_family_create', { p_child_name: childName, p_pin: pin })
+  adopt(r.family_id)
+  set({ profileId: r.profile_id })
+  await refresh()
+}
+
+// Nach dem Abmelden (auth.ts): mit wipeData alles Familiäre löschen, sonst bleibt der Stand für die
+// nächste Anmeldung mit demselben Konto (wartende Antworten werden dann gesendet)
+export function forgetDevice(wipeData: boolean) {
+  set({ parent: null, needsFamily: false })
+  if (wipeData) wipe()
 }
 
 export function selectProfile(id: string) {
@@ -209,17 +292,24 @@ export function selectProfile(id: string) {
 }
 
 export async function refresh() {
-  const code = state.code
-  if (!code) return
+  const family = state.family
+  if (!family || state.auth === 'signed_out') return
   try {
     await flush()
-    const pull = await rpc<Pull>('bc_pull', { p_code: code, p_token: token() })
-    // Während des Ladens getrennt oder anders verbunden: Ergebnis verwerfen (Siggi N1)
-    if (state.code !== code) return
+    const pull = await rpc<Pull>('bc_pull', { p_token: token() })
+    // Während des Ladens abgemeldet oder andere Familie: Ergebnis verwerfen (Siggi N1)
+    if (state.family !== family || (state.auth as AuthStatus) === 'signed_out') return
+    if (pull.family_id && pull.family_id !== family) return
     applyPull(pull)
   } catch (e) {
     if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
-    else throw e
+    // Konto gehört keiner Familie mehr (z. B. von den anderen Eltern entfernt)
+    else if (e instanceof ApiError && e.code === 'no_family') {
+      if (state.family === family) {
+        wipe()
+        set({ needsFamily: state.auth === 'signed_in' })
+      }
+    } else throw e
   }
 }
 
@@ -289,21 +379,21 @@ export function flush(): Promise<void> {
     await Promise.resolve()
     set({ syncing: true })
     try {
-      while (state.code && state.queue.length) {
+      while (state.family && state.auth !== 'signed_out' && state.queue.length) {
         const item = state.queue[0]
         try {
           if (item.kind === 'answer') {
             await rpc('bc_answer', {
-              p_code: state.code, p_answer_id: item.id, p_profile_id: item.profileId, p_question_id: item.questionId,
+              p_answer_id: item.id, p_profile_id: item.profileId, p_question_id: item.questionId,
               p_correct: item.correct, p_first_try: item.firstTry, p_mode: item.mode, p_answered_at: item.at,
               p_round_id: item.roundId,
             })
           } else if (item.kind === 'round') {
-            await rpc('bc_round_finish', { p_code: state.code, p_round_id: item.roundId, p_profile_id: item.profileId })
+            await rpc('bc_round_finish', { p_round_id: item.roundId, p_profile_id: item.profileId })
           } else if (item.kind === 'boss') {
-            await rpc('bc_boss_win', { p_code: state.code, p_profile_id: item.profileId, p_exam_id: item.examId })
+            await rpc('bc_boss_win', { p_profile_id: item.profileId, p_exam_id: item.examId })
           } else {
-            await rpc('bc_unit_seen', { p_code: state.code, p_profile_id: item.profileId, p_unit_id: item.unitId })
+            await rpc('bc_unit_seen', { p_profile_id: item.profileId, p_unit_id: item.unitId })
           }
         } catch (e) {
           // „Gesehen“ ist nur eine Komfortangabe: bei jedem Fehler außer offline verwerfen (z. B. vor Migration 004)
@@ -311,7 +401,8 @@ export function flush(): Promise<void> {
             set({ queue: state.queue.filter((q) => q !== item) })
             continue
           }
-          if (e instanceof ApiError && (e.code === 'offline' || e.code === 'server_error' || e.code === 'retry')) {
+          // Ohne Sitzung oder Familie bleibt die Antwort liegen, bis das Gerät wieder angemeldet ist
+          if (e instanceof ApiError && ['offline', 'server_error', 'retry', 'not_signed_in', 'no_family', 'missing_function'].includes(e.code)) {
             set({ offline: e.code === 'offline' })
             return
           }
@@ -338,14 +429,13 @@ export function flush(): Promise<void> {
 // Einlösen geht nur online (der Server bucht atomar). Die ID kommt vom Aufrufer und bleibt bei
 // Wiederholungen gleich, damit ein zweiter Tipp nach Netzfehler nicht doppelt bucht.
 export async function redeem(rewardId: string, redemptionId: string) {
-  const code = state.code
   const profileId = state.profileId
-  if (!code || !profileId) throw new ApiError('offline')
+  if (!state.family || !profileId) throw new ApiError('offline')
   // Erst offene Antworten senden, damit der Sternestand auf dem Server stimmt
   await flush()
   // Hängen noch Antworten (offline, Serverfehler), stimmt der Stand auf dem Server nicht: nicht einlösen (Bodo)
   if (state.queue.some((q) => q.kind !== 'seen')) throw new ApiError(state.offline ? 'offline' : 'retry')
-  await rpc('bc_redeem', { p_code: code, p_redemption_id: redemptionId, p_profile_id: profileId, p_reward_id: rewardId })
+  await rpc('bc_redeem', { p_redemption_id: redemptionId, p_profile_id: profileId, p_reward_id: rewardId })
   await refresh().catch(() => undefined)
 }
 
@@ -353,7 +443,7 @@ export async function redeem(rewardId: string, redemptionId: string) {
 
 export async function parentUnlock(pin: string): Promise<{ ok: boolean; error?: string; locked_until?: string }> {
   const r = await rpc<{ ok: boolean; token?: string; expires_at?: string; error?: string; locked_until?: string }>(
-    'bc_parent_unlock', { p_code: state.code, p_pin: pin },
+    'bc_parent_unlock', { p_pin: pin },
   )
   if (r.ok && r.token) {
     set({ parent: { token: r.token, until: Date.now() + 14 * 60_000 } })
@@ -365,7 +455,7 @@ export async function parentUnlock(pin: string): Promise<{ ok: boolean; error?: 
 export function parentLock() {
   const t = token()
   set({ parent: null })
-  if (t) void rpc('bc_parent_lock', { p_code: state.code, p_token: t }).catch(() => undefined)
+  if (t) void rpc('bc_parent_lock', { p_token: t }).catch(() => undefined)
   void refresh().catch(() => undefined)
 }
 
@@ -376,7 +466,31 @@ export function parentActive() {
 async function parentRpc<T>(fn: string, args: Record<string, unknown>) {
   const t = token()
   if (!t) throw new ApiError('pin_required')
-  return rpc<T>(fn, { p_code: state.code, p_token: t, ...args })
+  return rpc<T>(fn, { p_token: t, ...args })
+}
+
+// ---------- Eltern der Familie (Google-Konten) ----------
+
+export interface ParentList {
+  parents: { user_id: string; email: string; is_me: boolean; added_at: string }[]
+  invites: { email: string; created_at: string; expires_at: string }[]
+}
+
+// Nur im Speicher (Eltern-Inhalt, Siggi N2)
+export function loadParents() {
+  return parentRpc<ParentList>('bc_parents', {})
+}
+
+export async function inviteParent(email: string) {
+  await parentRpc('bc_parent_invite', { p_email: normEmail(email) })
+}
+
+export async function deleteInvite(email: string) {
+  await parentRpc('bc_parent_invite_delete', { p_email: email })
+}
+
+export async function removeParent(userId: string) {
+  await parentRpc('bc_parent_remove', { p_user_id: userId })
 }
 
 export async function setQuestionStatus(ids: string[], status: 'entwurf' | 'freigegeben') {
@@ -530,7 +644,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('online', () => void refresh().catch(() => undefined))
   // Zurück in die App (z. B. am nächsten Morgen): neu abgleichen, damit Tagesstand und Sterne stimmen (Bodo)
   document.addEventListener?.('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state.code) void refresh().catch(() => undefined)
+    if (document.visibilityState === 'visible' && state.family) void refresh().catch(() => undefined)
   })
-  if (state.code) void refresh().catch(() => undefined)
+  // Der erste Abgleich startet, sobald auth.ts die Sitzung kennt (authChanged → linkSession → refresh)
 }

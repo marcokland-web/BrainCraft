@@ -193,7 +193,7 @@ main{display:grid;gap:18px}
 .home .demo-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:14px 16px;grid-column:1 / -1}
 .home .demo-banner .btn{min-height:44px}
 /* Knopf auf Inhaltskarte: deckende Tönung statt Glas (Glas auf Weiß war unsichtbar) */
-.parents .approve-acts .btn.tinted,.home .demo-banner .btn.tinted{background:var(--tint);border-color:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
+.parents .approve-acts .btn.tinted,.home .demo-banner .btn.tinted,.parents .family .btn.tinted{background:var(--tint);border-color:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
 
 /* Einrichten */
 .setup .setup-hero{display:grid;justify-items:center;text-align:center;gap:8px}
@@ -206,7 +206,37 @@ main{display:grid;gap:18px}
 .field > span{font-size:15px;color:var(--muted)}
 .setup-err{margin:0;color:var(--bad);font-weight:600}
 .setup-acts{display:grid;gap:8px}
-.setup .setup-code{margin:0;padding:14px;border-radius:var(--r-m);background:var(--fill);font:700 22px/1.3 var(--f-round);letter-spacing:.04em;text-align:center;overflow-wrap:anywhere;user-select:all}
+.setup .setup-wait{text-align:center}
+.setup .setup-note{font-size:15px}
+.setup .setup-signin{justify-items:center;text-align:center}
+.setup .setup-signin > p{max-width:46ch}
+.setup .setup-invite p{margin:0}
+
+/* „Mit Google anmelden“ nach Googles Branding-Richtlinien: weiß mit grauem Rand (hell), #131314 (dunkel),
+   offizielles „G“ in Farbe, Pillenform; Studio-Systemschrift statt geladener Schrift, 48 px hoch (Touch) */
+.gsi-btn{all:unset;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:12px;min-height:48px;padding:0 20px 0 14px;border-radius:999px;background:var(--gsi-bg);border:1px solid var(--gsi-edge);color:var(--gsi-ink);font:500 16px/1.2 var(--f-body);max-width:100%}
+.gsi-btn .gsi-logo{width:20px;height:20px;flex:none}
+.gsi-btn:hover{box-shadow:0 1px 3px rgb(0 0 0 / .18)}
+.gsi-btn:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.gsi-btn[disabled]{opacity:.6;cursor:default}
+:root{--gsi-bg:#FFFFFF;--gsi-edge:#747775;--gsi-ink:#1F1F1F}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--gsi-bg:#131314;--gsi-edge:#8E918F;--gsi-ink:#E3E3E3}}
+:root[data-theme="dark"]{--gsi-bg:#131314;--gsi-edge:#8E918F;--gsi-ink:#E3E3E3}
+
+/* Eltern der Familie im Cockpit */
+.parents .fam-list .row .tx b{overflow-wrap:anywhere}
+.parents .fam-list .row{cursor:default}
+.parents .fam-list .row .btn{min-height:44px;padding:0 14px;font-size:15px;flex:none}
+.parents .invite-form{display:grid;gap:10px;margin-top:12px}
+.parents .invite-row{display:flex;gap:8px;flex-wrap:wrap}
+.parents .invite-row .field{flex:1 1 220px}
+.parents .invite-row .btn{min-height:50px;align-self:end;flex:0 0 auto;padding:0 20px}
+@media (max-width:520px){.parents .invite-row .btn{flex:1 1 100%}}
+.parents .fam-parents li:first-child{border-top:0;padding-top:0}
+.acc-row{cursor:default}
+.acc-row .acc-pic{width:44px;height:44px;border-radius:50%;flex:none;object-fit:cover;background:var(--fill)}
+.acc-row .acc-initial{display:grid;place-items:center;background:var(--tint);color:var(--accent);font:600 19px/1 var(--f-round)}
+.acc-row .tx small{overflow-wrap:anywhere}
 
 /* Eltern-Cockpit */
 .parents .parents-bar{display:flex;align-items:center;justify-content:space-between;gap:12px}

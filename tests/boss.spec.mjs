@@ -12,6 +12,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { authRoute, bearerOk, FAMILY, signedIn } from './fake-auth.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PW = process.env.PLAYWRIGHT_DIR ?? join(homedir(), 'Apps/DasTeam/tools/node_modules/playwright')
@@ -39,7 +40,6 @@ const T = (key, lang = 'de') => {
 // ---------- Fake-Daten ----------
 const KID = '11111111-1111-4111-8111-111111111111'
 const KID2 = '22222222-2222-4222-8222-222222222222'
-const CODE = 'ABCD-EFGH-JKMN-PQRS-TUVW'
 const later = new Date(Date.now() + 30 * 86400000).toISOString()
 // Reihenfolge nach 005 (Greta); absichtlich gemischt geliefert, die App muss nach sort ordnen
 const ITEMS = [
@@ -113,7 +113,10 @@ function makeServer(opts) {
     srv.calls.push({ fn, args: a })
     const reply = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body) })
     const fail = (message) => reply({ code: 'P0001', message }, 400)
-    if (a.p_code !== CODE) return fail('not_found')
+    // Google-Sitzung statt Familien-Code (Migration 007)
+    if (!bearerOk(route)) return reply({ code: '42501', message: 'permission denied' }, 401)
+    if ('p_code' in a) return fail('p_code_not_expected')
+    if (fn === 'bc_session') return reply({ family_id: FAMILY, joined: false })
     const D = d()
     const profile = D.profiles.find((p) => p.id === a.p_profile_id)
     switch (fn) {
@@ -173,7 +176,7 @@ function makeServer(opts) {
 }
 
 const browser = await pw[BROWSER].launch()
-const connected = { 'braincraft:code': CODE, 'braincraft:profile': KID }
+const connected = signedIn({ 'braincraft:profile': KID })
 
 async function open({ size = 'iphone', storage = connected, lang = 'de', srv = makeServer(), ctx: given } = {}) {
   const ctx = given ?? await browser.newContext({ viewport: SIZES[size], serviceWorkers: 'block', deviceScaleFactor: 1 })
@@ -182,6 +185,7 @@ async function open({ size = 'iphone', storage = connected, lang = 'de', srv = m
       const u = route.request().url()
       if (u.startsWith(ORIGIN)) return route.continue()
       if (u.includes('.supabase.co/rest/v1/rpc/')) return srv.handle(route)
+      if (u.includes('.supabase.co/auth/v1/')) return authRoute(route)
       foreign.push(u)
       return route.abort()
     })
@@ -387,7 +391,7 @@ console.log(`[${BROWSER}] 2. Schaden 2/1/0, Fehlerregeln, Reihenfolge`)
   ok('Sieg-Ansicht: Pilotenhelm und 10 Sterne', txt.includes(DE.helm) && txt.includes('10 Sterne'), txt)
   ok('Sterne sofort: 1 Stern je Frage und Kampf (+1) +10 Boss', (await pill(page)) === p0 + 11, `${p0} -> ${await pill(page)}`)
   await settle(page, srv)
-  const order = srv.calls.map((c) => c.fn).filter((f) => f !== 'bc_pull')
+  const order = srv.calls.map((c) => c.fn).filter((f) => f !== 'bc_pull' && f !== 'bc_session')
   ok('bc_boss_win nach allen Boss-Antworten, genau einmal', order.at(-1) === 'bc_boss_win' && calls(srv, 'bc_boss_win').length === 1 && calls(srv, 'bc_boss_win')[0].args.p_exam_id === 'e1', order.join(','))
   ok('Server: Pilotenhelm, Sieg e1, Stand = Anzeige', srv.data.inventory.some((i) => i.profile_id === KID && i.item_key === 'helm' && i.exam_id === 'e1') && srv.data.profiles[0].stars_balance === p0 + 11)
   ok('Server: nur die 1. Antwort mit first_try (Stern)', calls(srv, 'bc_answer').map((c) => c.args.p_first_try).join() === 'true,false,false,false,false', calls(srv, 'bc_answer').map((c) => c.args.p_first_try).join())
@@ -495,7 +499,7 @@ console.log(`[${BROWSER}] 4. Sieg offline, später online`)
   await page.evaluate(() => window.dispatchEvent(new Event('online')))
   await settle(page, srv)
   await wait(500)
-  const fns = srv.calls.map((c) => c.fn).filter((f) => f !== 'bc_pull')
+  const fns = srv.calls.map((c) => c.fn).filter((f) => f !== 'bc_pull' && f !== 'bc_session')
   ok('Online: 5 Antworten, dann bc_boss_win', fns.join(',') === 'bc_answer,bc_answer,bc_answer,bc_answer,bc_answer,bc_boss_win', fns.join(','))
   ok('Online: Server = Helm, Stand = Anzeige', srv.data.inventory.some((i) => i.profile_id === KID && i.item_key === 'helm') && (await pill(page)) === srv.data.profiles[0].stars_balance && srv.data.profiles[0].stars_balance === p0 + 11)
   ok('Online: Schlange leer', ((await ls(page, 'braincraft:queue')) ?? []).length === 0)
@@ -555,7 +559,7 @@ console.log(`[${BROWSER}] 6. Sofort-Stern bei 39/40`)
 // =========================== 7. Mehrere Kinder ===========================
 console.log(`[${BROWSER}] 7. Mehrere Kinder`)
 {
-  const { ctx, page, srv } = await open({ storage: { 'braincraft:code': CODE, 'braincraft:profile': KID2 } })
+  const { ctx, page, srv } = await open({ storage: signedIn({ 'braincraft:profile': KID2 }) })
   await toGear(page)
   const g = await gearState(page)
   ok('Ben: 3 von 12, eigene Teile', g.count === '3 von 12 Teilen' && g.won.map((w) => w.name).join() === [DE.helm, DE.handschuhe, DE.stiefel].join(), JSON.stringify(g))

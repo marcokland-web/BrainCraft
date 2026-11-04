@@ -1,16 +1,20 @@
 // BrainCraft am Mac: Klassenarbeit aus Heftfotos über Claude Code (ohne KI-Kosten pro Seite)
 //
 //   node tools/braincraft.ts pruefen <ordner>     ergebnis.json prüfen → geprueft.json (macht Claude)
-//   node tools/braincraft.ts einrichten           Familie mit Einladungscode anlegen (einmalig, Marco im Terminal)
 //   node tools/braincraft.ts einspielen <ordner>  geprueft.json als Entwurf einspielen (Marco im Terminal, mit PIN)
+//   node tools/braincraft.ts abmelden             gespeicherte Google-Sitzung am Mac löschen
 //
-// Die PIN wird nur eingetippt und nie gespeichert. Der Familien-Code liegt nach „einrichten“
-// in ~/.config/braincraft/familie (nur für dich lesbar), sonst wird er abgefragt.
+// Anmeldung wie in der App mit Google (Migration 007): Beim ersten Mal öffnet sich der Browser, Google leitet
+// zurück auf http://localhost:5179/braincraft-cli (in Supabase als Redirect-URL eintragen). Gespeichert wird nur
+// das Erneuerungs-Token in ~/.config/braincraft/sitzung (nur für dich lesbar). Die PIN wird nur eingetippt und
+// nie gespeichert. Eine neue Familie legt man in der App an (nach der Google-Anmeldung).
 // Läuft mit Node 24 direkt als TypeScript.
 
 import { createInterface } from 'node:readline/promises'
-import { randomInt } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { createServer } from 'node:http'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { clean } from '../supabase/functions/bc-extract/validate.ts'
@@ -18,7 +22,11 @@ import { clean } from '../supabase/functions/bc-extract/validate.ts'
 const SUPABASE_URL = 'https://asfwbuptsfcrgmmgdgim.supabase.co'
 // Öffentlicher Schlüssel (publishable), wie in der App; die Rechte liegen in den bc_*-Funktionen
 const PUBLISHABLE_KEY = 'sb_publishable_uXsPWezRtId6Eh3Dme7BcQ_mQzAx6Se'
-const CODE_FILE = join(homedir(), '.config', 'braincraft', 'familie')
+const CONFIG_DIR = join(homedir(), '.config', 'braincraft')
+const SESSION_FILE = join(CONFIG_DIR, 'sitzung')
+const OLD_CODE_FILE = join(CONFIG_DIR, 'familie')
+const CLI_PORT = 5179
+const CLI_REDIRECT = `http://localhost:${CLI_PORT}/braincraft-cli`
 
 interface Meta {
   fach?: string
@@ -32,10 +40,14 @@ const fail = (text: string): never => {
   process.exit(1)
 }
 
+let accessToken: string | null = null
+
 async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+  const headers: Record<string, string> = { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' }
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`
   const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
-    headers: { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(args),
   })
   const data = await res.json().catch(() => null)
@@ -81,17 +93,80 @@ function askHidden(question: string): Promise<string> {
   })
 }
 
-async function familyCode(): Promise<string> {
-  if (existsSync(CODE_FILE)) return readFileSync(CODE_FILE, 'utf8').trim()
-  return ask('Familien-Code: ')
+// ---------- Anmeldung mit Google (PKCE, Rückleitung auf localhost) ----------
+
+const b64url = (b: Buffer) => b.toString('base64url')
+
+interface Tokens { access_token: string; refresh_token: string }
+
+async function token(grant: 'pkce' | 'refresh_token', body: Record<string, string>): Promise<Tokens> {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=${grant}`, {
+    method: 'POST',
+    headers: { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => null)
+  if (!res.ok || !data?.access_token || !data?.refresh_token) throw new Error(data?.error_description ?? data?.msg ?? `HTTP ${res.status}`)
+  return data as Tokens
 }
 
-async function unlock(code: string): Promise<string> {
+function saveSession(t: Tokens) {
+  mkdirSync(CONFIG_DIR, { recursive: true })
+  writeFileSync(SESSION_FILE, JSON.stringify({ refresh_token: t.refresh_token }) + '\n')
+  chmodSync(SESSION_FILE, 0o600)
+}
+
+async function googleLogin(): Promise<Tokens> {
+  const verifier = b64url(randomBytes(48))
+  const challenge = b64url(createHash('sha256').update(verifier).digest())
+  const url = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(CLI_REDIRECT)}` +
+    `&code_challenge=${challenge}&code_challenge_method=s256`
+  const code = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => { server.close(); reject(new Error('Zeit abgelaufen')) }, 5 * 60_000)
+    const server = createServer((req, res) => {
+      const u = new URL(req.url ?? '/', CLI_REDIRECT)
+      if (u.pathname !== '/braincraft-cli') { res.writeHead(404).end(); return }
+      const c = u.searchParams.get('code')
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(`<!doctype html><meta charset="utf-8"><title>BrainCraft</title><p style="font:17px -apple-system,sans-serif;margin:40px">` +
+        (c ? 'Angemeldet. Du kannst dieses Fenster schließen und im Terminal weitermachen.' : 'Anmeldung abgebrochen.') + '</p>')
+      clearTimeout(timer)
+      server.close()
+      if (c) resolve(c)
+      else reject(new Error(u.searchParams.get('error_description') ?? 'abgebrochen'))
+    })
+    server.on('error', () => reject(new Error(`Port ${CLI_PORT} ist belegt`)))
+    server.listen(CLI_PORT, '127.0.0.1', () => {
+      console.log('Im Browser mit Google anmelden (dasselbe Konto wie in der App) …')
+      execFile('open', [url], (e) => { if (e) console.log(`Bitte diese Adresse im Browser öffnen:\n${url}`) })
+    })
+  })
+  return token('pkce', { auth_code: code, code_verifier: verifier })
+}
+
+async function signIn() {
+  if (existsSync(OLD_CODE_FILE)) rmSync(OLD_CODE_FILE)   // Familien-Code gibt es nicht mehr
+  let t: Tokens | null = null
+  if (existsSync(SESSION_FILE)) {
+    try {
+      const saved = JSON.parse(readFileSync(SESSION_FILE, 'utf8')) as { refresh_token?: string }
+      if (saved.refresh_token) t = await token('refresh_token', { refresh_token: saved.refresh_token })
+    } catch {
+      t = null   // abgelaufen oder widerrufen: neu anmelden
+    }
+  }
+  if (!t) t = await googleLogin().catch((e) => fail(`Anmeldung mit Google fehlgeschlagen (${(e as Error).message}).`))
+  saveSession(t)
+  accessToken = t.access_token
+  const s = await rpc<{ family_id: string | null }>('bc_session', {}).catch((e) => fail(`Anmeldung nicht bestätigt (${(e as Error).message}).`))
+  if (!s.family_id) fail('Dieses Google-Konto gehört noch zu keiner Familie. Bitte zuerst in der App anmelden und die Familie anlegen.')
+}
+
+async function unlock(): Promise<string> {
   const pin = await askHidden('Eltern-PIN (4 Ziffern): ')
   const r = await rpc<{ ok: boolean; token?: string; error?: string; locked_until?: string }>('bc_parent_unlock', {
-    p_code: code,
     p_pin: pin,
-  }).catch(() => fail('Familien-Code nicht gefunden.'))
+  }).catch((e) => fail(`Entsperren fehlgeschlagen (${(e as Error).message}).`))
   if (r.ok && r.token) return r.token
   if (r.error === 'pin_locked') fail(`PIN gesperrt bis ${new Date(r.locked_until!).toLocaleTimeString('de-DE')}.`)
   return fail('PIN falsch.')
@@ -134,27 +209,6 @@ function warnings(out: ReturnType<typeof clean>): string[] {
   return w
 }
 
-async function einrichten() {
-  const invite = await ask('Einladungscode: ')
-  const child = await ask('Vorname des Kindes: ')
-  if (!child || child.length > 30) fail('Bitte einen Vornamen mit höchstens 30 Zeichen.')
-  const pin = await askHidden('Neue Eltern-PIN (4 Ziffern): ')
-  if (!/^[0-9]{4}$/.test(pin)) fail('Die PIN muss aus 4 Ziffern bestehen.')
-  if ((await askHidden('PIN wiederholen: ')) !== pin) fail('Die PINs stimmen nicht überein.')
-  // 20 Zeichen ohne verwechselbare Zeichen (kein 0/O, 1/I/L)
-  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-  const raw = Array.from({ length: 20 }, () => abc[randomInt(abc.length)]).join('')
-  const code = raw.match(/.{4}/g)!.join('-')
-  await rpc('bc_create', { p_invite: invite, p_code: code, p_child_name: child, p_pin: pin }).catch((e) =>
-    fail(e.message === 'invite_invalid' ? 'Einladungscode ungültig oder abgelaufen.' : `Anlegen fehlgeschlagen (${e.message}).`),
-  )
-  mkdirSync(join(homedir(), '.config', 'braincraft'), { recursive: true })
-  writeFileSync(CODE_FILE, code + '\n')
-  chmodSync(CODE_FILE, 0o600)
-  console.log(`\n✓ Familie angelegt. Familien-Code: ${code}`)
-  console.log('  Bitte sicher notieren: Damit verbindest du später die App auf euren Geräten.')
-}
-
 interface Pull {
   profiles: { id: string; child_name: string }[]
   subjects: { id: string; name: string }[]
@@ -170,10 +224,10 @@ async function einspielen(dir: string) {
   console.log(`Klassenarbeit: ${meta.fach} – ${meta.arbeit}${meta.datum ? ` (${meta.datum})` : ''}`)
   console.log(`${data.summary_slides.length} Folien, ${data.questions.length} Fragen\n`)
 
-  const code = await familyCode()
-  const token = await unlock(code)
+  await signIn()
+  const token = await unlock()
   try {
-    const pull = await rpc<Pull>('bc_pull', { p_code: code, p_token: token })
+    const pull = await rpc<Pull>('bc_pull', { p_token: token })
     const kids = meta.kind ? pull.profiles.filter((p) => p.child_name === meta.kind) : pull.profiles
     if (kids.length !== 1) fail('Kind nicht eindeutig. Bitte meta.kind in ergebnis.json setzen.')
     const kid = kids[0]
@@ -182,7 +236,7 @@ async function einspielen(dir: string) {
     const subjectId =
       subject?.id ??
       (await rpc<string>('bc_subject_save', {
-        p_code: code, p_token: token, p_id: null, p_name: meta.fach, p_icon: 'book', p_color_theme: 'brand',
+        p_token: token, p_id: null, p_name: meta.fach, p_icon: 'book', p_color_theme: 'brand',
       }))
     const exam = pull.exams.find(
       (e) => e.subject_id === subjectId && e.profile_id === kid.id && e.title.toLowerCase() === meta.arbeit!.toLowerCase(),
@@ -190,12 +244,12 @@ async function einspielen(dir: string) {
     const examId =
       exam?.id ??
       (await rpc<string>('bc_exam_save', {
-        p_code: code, p_token: token, p_id: null, p_profile_id: kid.id, p_subject_id: subjectId,
+        p_token: token, p_id: null, p_profile_id: kid.id, p_subject_id: subjectId,
         p_title: meta.arbeit, p_exam_date: meta.datum ?? null, p_is_archived: false,
       }))
 
     const r = await rpc<{ unit_id: string | null; inserted: number }>('bc_unit_import', {
-      p_code: code, p_token: token, p_exam_id: examId, p_scan_job_id: null,
+      p_token: token, p_exam_id: examId, p_scan_job_id: null,
       p_slides: data.summary_slides, p_questions: data.questions,
     })
     console.log(`✓ ${r.inserted} neue Fragen als Entwurf eingespielt${exam ? '' : ' (Klassenarbeit neu angelegt)'}.`)
@@ -203,12 +257,14 @@ async function einspielen(dir: string) {
   } catch (e) {
     fail(`Einspielen fehlgeschlagen (${(e as Error).message}).`)
   } finally {
-    await rpc('bc_parent_lock', { p_code: code, p_token: token }).catch(() => undefined)
+    await rpc('bc_parent_lock', { p_token: token }).catch(() => undefined)
   }
 }
 
 const [cmd, arg] = process.argv.slice(2)
 if (cmd === 'pruefen' && arg) pruefen(arg)
-else if (cmd === 'einrichten') await einrichten()
 else if (cmd === 'einspielen' && arg) await einspielen(arg)
-else fail('Aufruf: node tools/braincraft.ts pruefen|einspielen <ordner> oder einrichten')
+else if (cmd === 'abmelden') {
+  if (existsSync(SESSION_FILE)) rmSync(SESSION_FILE)
+  console.log('✓ Google-Sitzung am Mac gelöscht.')
+} else fail('Aufruf: node tools/braincraft.ts pruefen|einspielen <ordner> oder abmelden')

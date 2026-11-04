@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../lib/api'
 import { fillName, useT } from '../lib/i18n'
+import { AccountRow } from '../components/Account'
+import { signOutDevice, useAuth } from '../lib/auth'
 import { usePrefs } from '../lib/prefs'
 import type { Question } from '../lib/types'
 import {
-  disconnect,
+  forgetDevice,
   parentActive,
   parentLock,
   parentUnlock,
@@ -13,13 +15,15 @@ import {
   useStore,
   type QuestionRow,
 } from '../lib/store'
+import { Family } from './Family'
 import { Manage } from './Manage'
 import { ShopManager } from './ShopManager'
 import { resetTogether, Together, togetherRunning } from './Together'
 
 const IDLE_MS = 3 * 60_000
 
-// Eltern-Cockpit (PIN-geschützt): Fragen freigeben, Gutscheine und Belohnungen, Scan-Anleitung, Gerät verwalten.
+// Eltern-Cockpit (PIN-geschützt): Fragen freigeben, Gutscheine und Belohnungen, Scan-Anleitung, Eltern der Familie,
+// Gerät abmelden. Die Google-Sitzung des Geräts allein öffnet das Cockpit nie (Kinder-iPad), nur die Eltern-PIN.
 // Analytik folgt mit dem Boss-Fight.
 
 function PinPad({ onDone }: { onDone: () => void }) {
@@ -135,8 +139,8 @@ export function Parents({ onClose }: { onClose: () => void }) {
   const s = useStore()
   const { name } = usePrefs()
   const [, tick] = useState(0)
-  const [showCode, setShowCode] = useState(false)
-  const [askDisconnect, setAskDisconnect] = useState(false)
+  const auth = useAuth()
+  const [askSignOut, setAskSignOut] = useState(false)
   const [busy, setBusy] = useState(false)
   const dialog = useRef<HTMLDialogElement>(null)
   const [error, setError] = useState<string | null>(null)
@@ -180,9 +184,20 @@ export function Parents({ onClose }: { onClose: () => void }) {
   }, [unlocked, onClose])
 
   useEffect(() => {
-    if (askDisconnect) dialog.current?.showModal()
+    if (askSignOut) dialog.current?.showModal()
     else dialog.current?.close()
-  }, [askDisconnect])
+  }, [askSignOut])
+
+  async function signOut(wipeData: boolean) {
+    setBusy(true)
+    resetTogether()
+    parentLock()
+    await signOutDevice()
+    forgetDevice(wipeData)
+    setBusy(false)
+    setAskSignOut(false)
+    onClose()
+  }
 
   if (!unlocked) {
     return (
@@ -278,14 +293,14 @@ export function Parents({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
+      <Family />
+
       <div>
         <p className="kicker">{t.deviceTitle}</p>
         <div className="list">
-          <button type="button" className="row" onClick={() => setShowCode(!showCode)}>
-            <span className="tx"><b>{t.showCode}</b>{showCode && <small className="num">{s.code}</small>}</span>
-          </button>
-          <button type="button" className="row danger-row" onClick={() => setAskDisconnect(true)}>
-            <span className="tx"><b>{t.disconnect}</b></span>
+          {auth.user && <AccountRow user={auth.user} />}
+          <button type="button" className="row danger-row" onClick={() => setAskSignOut(true)}>
+            <span className="tx"><b>{t.signOut}</b></span>
           </button>
         </div>
       </div>
@@ -293,12 +308,16 @@ export function Parents({ onClose }: { onClose: () => void }) {
       </>
       )}
 
-      <dialog ref={dialog} className="settings confirm" onClose={() => setAskDisconnect(false)}>
+      <dialog ref={dialog} className="settings confirm" aria-label={t.signOut} onClose={() => setAskSignOut(false)}>
         <div className="st">
-          <p>{t.disconnectAsk}</p>
+          <p>{t.signOutAsk}</p>
+          {s.queue.some((q) => q.kind !== 'seen') && (
+            <p className="setup-err">{t.signOutPending(s.queue.filter((q) => q.kind !== 'seen').length)}</p>
+          )}
           <div className="setup-acts">
-            <button type="button" className="btn danger wide" onClick={() => { parentLock(); disconnect(); setAskDisconnect(false); onClose() }}>{t.disconnectYes}</button>
-            <button type="button" className="btn plain wide" onClick={() => setAskDisconnect(false)}>{t.cancel}</button>
+            <button type="button" className="btn danger wide" disabled={busy} onClick={() => void signOut(true)}>{t.signOutWipe}</button>
+            <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false)}>{t.signOutKeep}</button>
+            <button type="button" className="btn plain wide" disabled={busy} onClick={() => setAskSignOut(false)}>{t.cancel}</button>
           </div>
         </div>
       </dialog>

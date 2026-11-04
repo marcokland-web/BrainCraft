@@ -1,6 +1,7 @@
 // BrainCraft – Heftfotos werden zu Lernfolien und Fragen (Schritt 2)
 //
-// Ablauf (immer mit Familien-Code + Eltern-Token, geprüft über die bc_*-Funktionen):
+// Ablauf (immer mit der Google-Sitzung der Eltern im Authorization-Header + Eltern-Token aus der PIN,
+// geprüft über die bc_*-Funktionen mit auth.uid(); Migration 007):
 //   start   { exam_id, count }        → Scan-Auftrag anlegen, signierte Upload-Adressen je Foto
 //   analyze { ticket, index }         → ein Foto an Claude, geprüfte Folien und Fragen zurück
 //   merge   { ticket, pages }         → Ergebnisse aller Seiten zusammenführen, Doppeltes entfernen
@@ -17,6 +18,13 @@ import { clean } from "./validate.ts";
 const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
   auth: { persistSession: false },
 });
+// Aufrufe im Namen des angemeldeten Kontos (bc_scan_start, bc_scan_check prüfen auth.uid())
+const asUser = (jwt: string) =>
+  createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+  });
+type Db = ReturnType<typeof asUser>;
 const anthropic = new Anthropic({ timeout: 140_000, maxRetries: 1 });
 // Modell und Denktiefe als Konfiguration (Marco entscheidet), Standard: aktuelles Opus
 const MODEL = Deno.env.get("BC_MODEL") ?? "claude-opus-5-5";
@@ -82,8 +90,8 @@ async function readTicket(s: unknown): Promise<Ticket> {
 
 // ---------- Datenbank ----------
 
-async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
-  const { data, error } = await db.rpc(fn, args);
+async function rpc<T>(fn: string, args: Record<string, unknown>, client: Db = db): Promise<T> {
+  const { data, error } = await client.rpc(fn, args);
   if (error) {
     // Eigene Fehlercodes der bc_*-Funktionen durchreichen, sonst nichts verraten
     const code = /^[a-z_]{3,40}$/.test(error.message) ? error.message : "server_error";
@@ -99,9 +107,9 @@ interface JobCheck {
   images_deleted: boolean;
 }
 
-// Prüft, dass der Auftrag zur Familie des Codes gehört; mit needParent auch das Eltern-Token
-async function checkJob(code: string, token: string, t: Ticket, needParent = true) {
-  const c = await rpc<JobCheck>("bc_scan_check", { p_code: code, p_token: token || null, p_job_id: t.job });
+// Prüft, dass der Auftrag zur Familie des angemeldeten Kontos gehört; mit needParent auch das Eltern-Token
+async function checkJob(user: Db, token: string, t: Ticket, needParent = true) {
+  const c = await rpc<JobCheck>("bc_scan_check", { p_token: token || null, p_job_id: t.job }, user);
   if (!c.found) throw new Fail("scan_not_found");
   if (needParent && !c.parent) throw new Fail("pin_required", 401);
   return c;
@@ -210,14 +218,13 @@ async function ask(system: string, content: Anthropic.Beta.Messages.BetaContentB
 
 // ---------- Aktionen ----------
 
-async function start(code: string, token: string, b: Record<string, unknown>) {
+async function start(user: Db, token: string, b: Record<string, unknown>) {
   const count = Number(b.count);
   const r = await rpc<{ job_id: string; family_id: string; prefix: string }>("bc_scan_start", {
-    p_code: code,
     p_token: token,
     p_exam_id: b.exam_id,
     p_image_count: count,
-  });
+  }, user);
   const t: Ticket = { job: r.job_id, fam: r.family_id, n: count, exp: Date.now() + 2 * 3600_000 };
   const uploads = [];
   for (let i = 0; i < count; i++) {
@@ -228,11 +235,11 @@ async function start(code: string, token: string, b: Record<string, unknown>) {
   return { ticket: await makeTicket(t), job_id: r.job_id, uploads };
 }
 
-async function analyze(code: string, token: string, b: Record<string, unknown>) {
+async function analyze(user: Db, token: string, b: Record<string, unknown>) {
   const t = await readTicket(b.ticket);
   const index = Number(b.index);
   if (!Number.isInteger(index) || index < 0 || index >= t.n) throw new Fail("bad_index");
-  if (!isOpen(await checkJob(code, token, t))) throw new Fail("scan_closed");
+  if (!isOpen(await checkJob(user, token, t))) throw new Fail("scan_closed");
   const { data, error } = await db.storage.from(BUCKET).download(`${prefix(t)}${index}.jpg`);
   if (error || !data) throw new Fail("image_missing");
   if (data.size > 1_048_576) throw new Fail("image_too_large");
@@ -249,9 +256,9 @@ async function analyze(code: string, token: string, b: Record<string, unknown>) 
   ]);
 }
 
-async function merge(code: string, token: string, b: Record<string, unknown>) {
+async function merge(user: Db, token: string, b: Record<string, unknown>) {
   const t = await readTicket(b.ticket);
-  if (!isOpen(await checkJob(code, token, t))) throw new Fail("scan_closed");
+  if (!isOpen(await checkJob(user, token, t))) throw new Fail("scan_closed");
   if (!Array.isArray(b.pages) || b.pages.length < 1 || b.pages.length > t.n) throw new Fail("bad_pages");
   if (!b.pages.every((p) => typeof p === "object" && p !== null)) throw new Fail("bad_pages");
   // Nur geprüfte Inhalte weitergeben, Größe begrenzen
@@ -263,10 +270,10 @@ async function merge(code: string, token: string, b: Record<string, unknown>) {
   return await ask(SYSTEM + "\n\n" + MERGE, [{ type: "text", text: input }]);
 }
 
-async function finish(code: string, token: string, b: Record<string, unknown>) {
+async function finish(user: Db, token: string, b: Record<string, unknown>) {
   const t = await readTicket(b.ticket);
-  // Fotos des eigenen Auftrags löschen darf jeder mit gültigem Ticket und Code (Eltern-Token kann abgelaufen sein)
-  const c = await checkJob(code, token, t, false);
+  // Fotos des eigenen Auftrags löschen darf jedes Elternteil der Familie mit gültigem Ticket (Eltern-Token kann abgelaufen sein)
+  const c = await checkJob(user, token, t, false);
   await removeImages(prefix(t));
   if (c.images_deleted) return { ok: true };
   const ok = b.ok === true && c.parent;
@@ -326,20 +333,22 @@ Deno.serve(async (req) => {
     if (raw.length > 600_000) return json({ error: "too_large" }, 413);
     const b = JSON.parse(raw) as Record<string, unknown> | null;
     if (typeof b !== "object" || b === null || Array.isArray(b)) return json({ error: "bad_json" }, 400);
-    const code = typeof b.code === "string" ? b.code : "";
+    // Google-Sitzung der Eltern (JWT von Supabase Auth); ohne sie keine Familie
+    const jwt = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+    if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt) || jwt.length > 4096) return json({ error: "not_signed_in" }, 401);
+    const user = asUser(jwt);
     const token = typeof b.token === "string" ? b.token : "";
-    if (!code) return json({ error: "not_found" }, 400);
     // Nur „finish“ geht ohne Eltern-Token (Fotos löschen, Siggi H2)
     if (!token && b.action !== "finish") return json({ error: "pin_required" }, 401);
     switch (b.action) {
       case "start":
-        return json(await start(code, token, b));
+        return json(await start(user, token, b));
       case "analyze":
-        return json(await analyze(code, token, b));
+        return json(await analyze(user, token, b));
       case "merge":
-        return json(await merge(code, token, b));
+        return json(await merge(user, token, b));
       case "finish":
-        return json(await finish(code, token, b));
+        return json(await finish(user, token, b));
       default:
         return json({ error: "bad_action" }, 400);
     }

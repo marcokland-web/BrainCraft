@@ -1,5 +1,6 @@
 // Bug-Bodo: Unit-Tests für src/lib/store.ts und src/lib/api.ts (Warteschlange, flush, refresh, Eltern-Token,
-// abgeleitete Werte). fetch ist gemockt: Es geht KEINE Anfrage an die echte Datenbank.
+// abgeleitete Werte, Anmeldung mit Google ab Migration 007). fetch ist gemockt: Es geht KEINE Anfrage an die
+// echte Datenbank. Die Google-Sitzung wird über authChanged() nachgestellt (auth.ts läuft nur im Browser).
 // Aufruf (Node 24, TypeScript direkt):
 //   cd /Users/marcokland/Apps/BrainCraft && TZ=Europe/Berlin node --test tests/store.test.ts
 // Ergebnis: Exit-Code 0 = alles bestanden.
@@ -57,9 +58,11 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms))
 
 const KID = '11111111-1111-1111-1111-111111111111'
 const KID2 = '22222222-2222-2222-2222-222222222222'
-const CODE = 'ABCD-EFGH-JKMN-PQRS-TUVW'
+const FAM = 'f0000000-0000-4000-8000-000000000001'
+const USER = { id: 'u0000000-0000-4000-8000-000000000001', email: 'eltern@example.org' }
 function fakePull(over: any = {}) {
   return {
+    family_id: FAM,
     today: '2026-10-24', parent: false,
     profiles: [
       { id: KID, child_name: 'Lia', avatar_id: 'a', stars_balance: 10, stars_today: 2, learn_days_week: 3 },
@@ -96,10 +99,20 @@ async function freshStore(storage: Record<string, unknown> = {}) {
   calls = []
   netDown = false
   for (const k of Object.keys(winListeners)) delete winListeners[k]
-  const mod = await import(`../src/lib/store.ts?n=${++n}`)
-  return mod as typeof import('../src/lib/store.ts')
+  const mod = (await import(`../src/lib/store.ts?n=${++n}`)) as typeof import('../src/lib/store.ts')
+  // Gerät war schon angemeldet: auth.ts meldet die gespeicherte Sitzung beim Start
+  if (storage['braincraft:family']) mod.authChanged(USER)
+  return mod
 }
+// Wie die erste Anmeldung mit Google: Sitzung da, bc_session liefert die Familie, danach bc_pull
+async function signIn(s: typeof import('../src/lib/store.ts'), user = USER) {
+  s.authChanged(user)
+  await s.linkSession()
+}
+let sessionFamily: string | null = FAM
 const defaultHandler: Handler = (fn) => {
+  if (fn === 'bc_session') return json({ family_id: sessionFamily })
+  if (fn === 'bc_my_invites') return json([])
   if (fn === 'bc_pull') return json(fakePull())
   if (fn === 'bc_answer') return json({ ok: true })
   if (fn === 'bc_round_finish') return json({ ok: true })
@@ -127,7 +140,7 @@ test('api: Fehlercodes werden durchgereicht, sonst server_error/offline', async 
 // ---------- Warteschlange ----------
 test('queueAnswer: richtige Parameter an bc_answer, Eintrag danach aus der Schlange', async () => {
   handler = defaultHandler
-  const s = await freshStore({ 'braincraft:code': CODE, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  const s = await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
   await tick(5) // Start-refresh abwarten
   calls = []
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r1' })
@@ -135,7 +148,7 @@ test('queueAnswer: richtige Parameter an bc_answer, Eintrag danach aus der Schla
   const a = answers()
   assert.equal(a.length, 1, 'genau eine bc_answer-Anfrage nach queueAnswer (tatsächlich ' + a.length + ')')
   const p = a[0].args
-  assert.equal(p.p_code, CODE)
+  assert.equal(p.p_code, undefined, 'kein Familien-Code mehr')
   assert.equal(p.p_profile_id, KID)
   assert.equal(p.p_question_id, 'q1')
   assert.equal(p.p_correct, true)
@@ -149,7 +162,7 @@ test('queueAnswer: richtige Parameter an bc_answer, Eintrag danach aus der Schla
 
 test('flush nach leerer Schlange bleibt nicht hängen (zweite Antwort wird auch gesendet)', async () => {
   handler = defaultHandler
-  const s = await freshStore({ 'braincraft:code': CODE, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  const s = await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
   await s.flush() // leere Schlange
   calls = []
   s.queueAnswer({ questionId: 'q2', correct: false, firstTry: false, mode: 'chill', roundId: 'r1' })
@@ -159,9 +172,9 @@ test('flush nach leerer Schlange bleibt nicht hängen (zweite Antwort wird auch 
 
 test('Ablauf ohne Start-refresh: Runde mit 5 Antworten, Rundenende, dann nächste Runde', async () => {
   handler = defaultHandler
-  // Frisch verbunden (wie nach Setup): kein Code beim Laden, daher kein Start-refresh
+  // Frisch angemeldet (wie nach Setup): keine Familie beim Laden, daher kein Start-refresh
   const s = await freshStore()
-  await s.connect(CODE)
+  await signIn(s)
   calls = []
   for (let i = 0; i < 5; i++) s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r1' })
   await tick(10)
@@ -178,7 +191,7 @@ test('Ablauf ohne Start-refresh: Runde mit 5 Antworten, Rundenende, dann nächst
 test('offline: Antworten bleiben in localStorage und gehen nach online-Ereignis raus, Reihenfolge bleibt', async () => {
   handler = defaultHandler
   const s = await freshStore()
-  await s.connect(CODE)
+  await signIn(s)
   netDown = true
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r1' })
   s.queueAnswer({ questionId: 'q2', correct: false, firstTry: false, mode: 'solo', roundId: 'r1' })
@@ -200,7 +213,7 @@ test('offline beim Laden: Schlange aus localStorage wird beim Start-refresh gese
     { kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' },
     { kind: 'answer', id: 'a2', profileId: KID, questionId: 'q2', correct: false, firstTry: false, mode: 'solo', at: '2026-10-24T07:00:01Z', roundId: 'r' },
   ]
-  await freshStore({ 'braincraft:code': CODE, 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
   await tick(20)
   assert.deepEqual(answers().map((c) => c.args.p_answer_id), ['a1', 'a2'])
   assert.equal(calls.at(-1)!.fn, 'bc_pull', 'erst senden, dann bc_pull')
@@ -209,7 +222,7 @@ test('offline beim Laden: Schlange aus localStorage wird beim Start-refresh gese
 test('inhaltlicher Fehler verwirft genau einen Eintrag', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   let first = true
   handler = (fn, args) => {
     if (fn === 'bc_answer' && args.p_question_id === 'q1' && first) { first = false; return err('question_not_found') }
@@ -229,7 +242,7 @@ test('inhaltlicher Fehler verwirft genau einen Eintrag', async () => {
 test('server_error und retry halten die Schlange an (nichts verworfen, nichts übersprungen)', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   for (const code of ['server_error', 'retry']) {
     handler = (fn, args) => (fn === 'bc_answer' ? (code === 'server_error' ? json({ message: 'Internal Server Error' }, 500) : err('retry')) : defaultHandler(fn, args))
     netDown = true
@@ -250,7 +263,7 @@ test('server_error und retry halten die Schlange an (nichts verworfen, nichts ü
 test('HTTP 5xx mit einwortiger Meldung wird nicht als inhaltlicher Fehler verworfen', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   netDown = true
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
   await tick(5)
@@ -264,7 +277,7 @@ test('HTTP 5xx mit einwortiger Meldung wird nicht als inhaltlicher Fehler verwor
 test('paralleles flush: kein Doppelsenden', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   netDown = true
   for (let i = 0; i < 4; i++) s.queueAnswer({ questionId: 'q' + i, correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
   await tick(5)
@@ -281,7 +294,7 @@ test('paralleles flush: kein Doppelsenden', async () => {
 test('queueRoundFinish sendet bc_round_finish mit Runde und Kind, danach bc_pull', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   calls = []
   netDown = true
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r9' })
@@ -292,7 +305,7 @@ test('queueRoundFinish sendet bc_round_finish mit Runde und Kind, danach bc_pull
   const fns = calls.map((c) => c.fn)
   assert.deepEqual(fns.slice(0, 2), ['bc_answer', 'bc_round_finish'])
   const rf = calls.find((c) => c.fn === 'bc_round_finish')!.args
-  assert.deepEqual(rf, { p_code: CODE, p_round_id: 'r9', p_profile_id: KID })
+  assert.deepEqual(rf, { p_round_id: 'r9', p_profile_id: KID })
   assert.ok(fns.includes('bc_pull'))
 })
 
@@ -300,7 +313,7 @@ test('queueRoundFinish sendet bc_round_finish mit Runde und Kind, danach bc_pull
 test('Sofort-Stern für solo und chill bei richtig + 1. Versuch', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   netDown = true
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: false, mode: 'solo', roundId: 'r' })
@@ -313,44 +326,186 @@ test('Sofort-Stern für solo und chill bei richtig + 1. Versuch', async () => {
   netDown = false
 })
 
-// ---------- Verbinden, Trennen ----------
-test('connect: falscher Code -> ApiError not_found, nichts gespeichert', async () => {
-  const s = await freshStore()
-  handler = () => err('not_found')
-  await assert.rejects(s.connect('XXXX-XXXX-XXXX-XXXX-XXXX'), (e: any) => e.code === 'not_found')
-  assert.equal(mem.get('braincraft:code'), undefined)
+// ---------- Anmelden, Einrichten, Abmelden (Migration 007) ----------
+test('Start mit Sitzung: erst bc_session, dann bc_pull ohne p_code; Familie gemerkt', async () => {
+  handler = defaultHandler
+  await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  await tick(10)
+  assert.deepEqual(calls.map((c) => c.fn), ['bc_session', 'bc_pull'])
+  assert.deepEqual(calls[1].args, { p_token: null })
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
 })
 
-test('createFamily: sendet Einladung, Code-Format, verbindet noch nicht', async () => {
-  const s = await freshStore()
-  handler = (fn) => (fn === 'bc_create' ? json({ family_id: 'f', profile_id: KID }) : defaultHandler(fn, {}))
-  const code = await s.createFamily('INV1-INV2-INV3-INV4', 'Lia', '1234')
-  assert.match(code, /^[A-HJKMNP-Z2-9]{4}(-[A-HJKMNP-Z2-9]{4}){4}$/)
-  const c = calls.find((x) => x.fn === 'bc_create')!.args
-  assert.deepEqual(c, { p_invite: 'INV1-INV2-INV3-INV4', p_code: code, p_child_name: 'Lia', p_pin: '1234' })
-  assert.equal(mem.get('braincraft:code'), undefined, 'noch nicht verbunden')
-  assert.equal(calls.filter((x) => x.fn === 'bc_pull').length, 0)
+test('ohne Sitzung (abgemeldet): kein Abgleich, Schlange bleibt liegen', async () => {
+  handler = defaultHandler
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' }]
+  const s = await freshStore({ 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  mem.set('braincraft:family', JSON.stringify(FAM))
+  s.authChanged(null)
+  await s.refresh()
+  await s.flush()
+  assert.equal(calls.length, 0, 'keine Anfrage ohne Sitzung: ' + calls.map((c) => c.fn).join(','))
+  assert.equal(queueLS().length, 1)
 })
 
-test('disconnect löscht code, profil, pull, queue und Namen', async () => {
+test('Konto ohne Familie: kein bc_pull, nichts gemerkt', async () => {
+  sessionFamily = null
+  handler = defaultHandler
+  const s = await freshStore()
+  await signIn(s)
+  assert.deepEqual(calls.map((c) => c.fn), ['bc_session', 'bc_my_invites'])
+  assert.equal(mem.get('braincraft:family'), undefined)
+  sessionFamily = FAM
+})
+
+test('Einladung: nie still annehmen; acceptInvite erst auf Tipp, declineInvite', async () => {
+  sessionFamily = null
+  let accepted = false
+  handler = (fn, args) => {
+    if (fn === 'bc_session') return json({ family_id: accepted ? FAM : null })
+    if (fn === 'bc_my_invites') return json([{ family_id: FAM, invited_by: 'oma@example.org', created_at: 'x', expires_at: 'y' }])
+    if (fn === 'bc_invite_accept') { accepted = true; return json({ family_id: args.p_family_id }) }
+    if (fn === 'bc_invite_decline') return json(true)
+    return defaultHandler(fn, args)
+  }
+  const s = await freshStore()
+  await signIn(s)
+  assert.ok(!calls.some((c) => c.fn === 'bc_invite_accept'), 'nicht still angenommen')
+  assert.equal(mem.get('braincraft:family'), undefined)
+  calls = []
+  await s.declineInvite(FAM)
+  assert.deepEqual(calls[0], { fn: 'bc_invite_decline', args: { p_family_id: FAM } })
+  calls = []
+  await s.acceptInvite(FAM)
+  assert.deepEqual(calls[0], { fn: 'bc_invite_accept', args: { p_family_id: FAM } })
+  assert.equal(calls.at(-1)!.fn, 'bc_pull')
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
+  sessionFamily = FAM
+  handler = defaultHandler
+})
+
+test('normEmail: gleiche Regel wie braincraft.email_norm', async () => {
+  const { normEmail, validEmail } = await import('../src/lib/email.ts')
+  assert.equal(normEmail(' \u200BZweit.Eltern+x@GoogleMail.com\u00A0'), 'zweiteltern@gmail.com')
+  assert.equal(normEmail('Oma.Test@Example.ORG'), 'oma.test@example.org', 'Punkte nur bei Gmail entfernen')
+  assert.equal(normEmail('a\uFEFFb@gmail.com'), 'ab@gmail.com')
+  assert.equal(normEmail('ohne-at'), 'ohne-at')
+  assert.ok(validEmail('a@b.de') && !validEmail('keine-adresse') && !validEmail('a@b'))
+})
+
+test('createFamily: bc_family_create mit Name und PIN, danach Familie und bc_pull', async () => {
+  sessionFamily = null
+  handler = (fn, args) => (fn === 'bc_family_create' ? json({ family_id: FAM, profile_id: KID2 }) : defaultHandler(fn, args))
+  const s = await freshStore()
+  await signIn(s)
+  calls = []
+  await s.createFamily('Lia', '1234')
+  assert.deepEqual(calls[0], { fn: 'bc_family_create', args: { p_child_name: 'Lia', p_pin: '1234' } })
+  assert.equal(calls.at(-1)!.fn, 'bc_pull')
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
+  assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID2, 'neues Kind gewählt')
+  sessionFamily = FAM
+  handler = defaultHandler
+})
+
+test('früherer Familien-Code: wird gelöscht, Stand und Schlange bleiben bis zur Anmeldung, dann gesendet', async () => {
+  handler = defaultHandler
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' }]
+  const s = await freshStore({ 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  assert.equal(mem.get('braincraft:code'), undefined, 'Code gelöscht')
+  assert.ok(mem.get('braincraft:pull'), 'Stand bleibt')
+  assert.equal(calls.length, 0, 'ohne Anmeldung keine Anfrage')
+  await signIn(s)
+  await tick(10)
+  assert.deepEqual(answers().map((c) => c.args.p_answer_id), ['a1'], 'alte Antwort nach Anmeldung gesendet')
+  assert.equal(queueLS().length, 0)
+})
+
+test('anderes Konto mit anderer Familie: alter Stand und Schlange werden verworfen', async () => {
+  handler = defaultHandler
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' }]
+  await freshStore()
+  mem.set('braincraft:profile', JSON.stringify(KID))
+  mem.set('braincraft:pull', JSON.stringify(fakePull({ family_id: 'f-alt' })))
+  mem.set('braincraft:family', JSON.stringify('f-alt'))
+  const OTHER = 'f0000000-0000-4000-8000-000000000002'
+  const KID3 = '33333333-3333-3333-3333-333333333333'
+  handler = (fn, args) => {
+    if (fn === 'bc_session') return json({ family_id: OTHER })
+    if (fn === 'bc_pull') return json(fakePull({ family_id: OTHER, profiles: [{ id: KID3, child_name: 'Mo', avatar_id: 'a', stars_balance: 0, stars_today: 0, learn_days_week: 0 }] }))
+    return defaultHandler(fn, args)
+  }
+  // Modul neu laden, damit der gespeicherte Familienwechsel greift
+  mem.set('braincraft:queue', JSON.stringify(q))
+  const s2 = (await import(`../src/lib/store.ts?n=${++n}`)) as typeof import('../src/lib/store.ts')
+  calls = []
+  await signIn(s2)
+  await tick(10)
+  assert.equal(answers().length, 0, 'Antwort der alten Familie nie gesendet')
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), OTHER)
+  assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID3)
+  handler = defaultHandler
+})
+
+test('no_family beim Abgleich (Elternteil entfernt): Stand vom Gerät gelöscht', async () => {
+  handler = defaultHandler
+  const s = await freshStore()
+  await signIn(s)
+  handler = (fn, args) => (fn === 'bc_pull' ? err('no_family') : defaultHandler(fn, args))
+  await s.refresh()
+  for (const k of ['braincraft:family', 'braincraft:profile', 'braincraft:pull']) assert.equal(mem.get(k), undefined, k)
+  handler = defaultHandler
+})
+
+test('not_signed_in beim Senden: Antwort bleibt in der Schlange', async () => {
+  handler = defaultHandler
+  const s = await freshStore()
+  await signIn(s)
+  handler = (fn, args) => (fn === 'bc_answer' ? json({ code: '42501', message: 'permission denied for function bc_answer' }, 401) : defaultHandler(fn, args))
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
+  await tick(10)
+  assert.equal(queueLS().length, 1)
+  handler = defaultHandler
+})
+
+test('forgetDevice(true) löscht Familie, Kind, Stand, Schlange und Namen', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   netDown = true
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
   await tick(5)
   netDown = false
   assert.equal(mem.get('braincraft:name'), 'Lia')
-  s.disconnect()
-  for (const k of ['braincraft:code', 'braincraft:profile', 'braincraft:pull']) assert.equal(mem.get(k), undefined, k)
+  s.authChanged(null)
+  s.forgetDevice(true)
+  for (const k of ['braincraft:family', 'braincraft:profile', 'braincraft:pull']) assert.equal(mem.get(k), undefined, k)
   assert.ok(!mem.get('braincraft:queue') || mem.get('braincraft:queue') === '[]', 'Schlange leer')
   assert.ok(!mem.get('braincraft:name'), 'Name leer')
 })
 
-test('disconnect während laufendem bc_pull: alte Daten kommen nicht zurück', async () => {
+test('forgetDevice(false) behält Stand und Schlange für die nächste Anmeldung', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
+  netDown = true
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
+  await tick(5)
+  netDown = false
+  s.authChanged(null)
+  s.forgetDevice(false)
+  assert.ok(mem.get('braincraft:pull'))
+  assert.equal(queueLS().length, 1)
+  calls = []
+  await signIn(s)
+  await tick(10)
+  assert.equal(answers().length, 1, 'nach erneuter Anmeldung gesendet')
+})
+
+test('Abmelden während laufendem bc_pull: alte Daten kommen nicht zurück', async () => {
+  const s = await freshStore()
+  handler = defaultHandler
+  await signIn(s)
   let release!: () => void
   handler = async (fn, args) => {
     if (fn === 'bc_pull') await new Promise<void>((r) => (release = r))
@@ -358,12 +513,38 @@ test('disconnect während laufendem bc_pull: alte Daten kommen nicht zurück', a
   }
   const p = s.refresh().catch(() => undefined)
   await tick(5)
-  s.disconnect()
+  s.authChanged(null)
+  s.forgetDevice(true)
   release()
   await p
   await tick(5)
-  assert.equal(mem.get('braincraft:pull'), undefined, 'pull nach Trennen wieder in localStorage: ' + (mem.get('braincraft:pull') ?? '').slice(0, 40))
-  assert.ok(!mem.get('braincraft:name'), 'Name nach Trennen wieder gesetzt: ' + mem.get('braincraft:name'))
+  assert.equal(mem.get('braincraft:pull'), undefined, 'pull nach Abmelden wieder in localStorage: ' + (mem.get('braincraft:pull') ?? '').slice(0, 40))
+  assert.ok(!mem.get('braincraft:name'), 'Name nach Abmelden wieder gesetzt: ' + mem.get('braincraft:name'))
+  handler = defaultHandler
+})
+
+test('Eltern der Familie: bc_parents, bc_parent_invite, _delete, bc_parent_remove mit Token', async () => {
+  const s = await freshStore()
+  const TOK = 'c'.repeat(64)
+  handler = (fn, args) => {
+    if (fn === 'bc_parent_unlock') return json({ ok: true, token: TOK, expires_at: 'x' })
+    if (fn === 'bc_parents') return json({ parents: [], invites: [] })
+    return defaultHandler(fn, args)
+  }
+  await signIn(s)
+  await assert.rejects(s.loadParents(), (e: any) => e.code === 'pin_required')
+  await s.parentUnlock('4711')
+  calls = []
+  await s.loadParents()
+  await s.inviteParent('  oma@gmail.com ')
+  await s.deleteInvite('oma@gmail.com')
+  await s.removeParent('u2')
+  assert.deepEqual(calls.map((c) => [c.fn, c.args]), [
+    ['bc_parents', { p_token: TOK }],
+    ['bc_parent_invite', { p_token: TOK, p_email: 'oma@gmail.com' }],  // vereinheitlicht (normEmail)
+    ['bc_parent_invite_delete', { p_token: TOK, p_email: 'oma@gmail.com' }],
+    ['bc_parent_remove', { p_token: TOK, p_user_id: 'u2' }],
+  ])
   handler = defaultHandler
 })
 
@@ -371,7 +552,7 @@ test('disconnect während laufendem bc_pull: alte Daten kommen nicht zurück', a
 test('parentUnlock: Token nur im Speicher, bc_pull mit Token, Sperre, parentLock', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   const TOK = 'a'.repeat(64)
   handler = (fn, args) => {
     if (fn === 'bc_parent_unlock') return json(args.p_pin === '4711' ? { ok: true, token: TOK, expires_at: 'x' } : { ok: false, error: 'pin_locked', locked_until: '2026-10-24T08:15:00Z' })
@@ -390,15 +571,15 @@ test('parentUnlock: Token nur im Speicher, bc_pull mit Token, Sperre, parentLock
   assert.ok(![...mem.values()].some((v) => v.includes(TOK)), 'Token nicht in localStorage')
   calls = []
   await s.setQuestionStatus(['q4'], 'freigegeben')
-  assert.deepEqual(calls[0], { fn: 'bc_question_set_status', args: { p_code: CODE, p_token: TOK, p_ids: ['q4'], p_status: 'freigegeben' } })
+  assert.deepEqual(calls[0], { fn: 'bc_question_set_status', args: { p_token: TOK, p_ids: ['q4'], p_status: 'freigegeben' } })
   calls = []
   await s.setQuestionActive('q4', false)
-  assert.deepEqual(calls[0], { fn: 'bc_question_set_active', args: { p_code: CODE, p_token: TOK, p_id: 'q4', p_active: false } })
+  assert.deepEqual(calls[0], { fn: 'bc_question_set_active', args: { p_token: TOK, p_id: 'q4', p_active: false } })
   calls = []
   s.parentLock()
   await tick(10)
   assert.equal(s.parentActive(), false)
-  assert.deepEqual(calls.find((c) => c.fn === 'bc_parent_lock')!.args, { p_code: CODE, p_token: TOK })
+  assert.deepEqual(calls.find((c) => c.fn === 'bc_parent_lock')!.args, { p_token: TOK })
   assert.equal(calls.find((c) => c.fn === 'bc_pull')!.args.p_token, null)
   await assert.rejects(s.setQuestionStatus(['q4'], 'freigegeben'), (e: any) => e.code === 'pin_required')
 })
@@ -407,8 +588,8 @@ test('parentUnlock: Token nur im Speicher, bc_pull mit Token, Sperre, parentLock
 test('playableQuestions / mastery / profileProgress', async () => {
   const s = await freshStore()
   handler = defaultHandler
-  await s.connect(CODE)
-  const st = { code: CODE, profileId: KID, pull: fakePull(), queue: [], syncing: false, offline: false, parent: null } as any
+  await signIn(s)
+  const st = { family: FAM, profileId: KID, pull: fakePull(), queue: [], syncing: false, offline: false, parent: null } as any
   assert.deepEqual(s.playableQuestions(st).map((q) => q.id), ['q1', 'q2', 'q3'], 'ohne Entwurf, archiviert, anderes Kind')
   assert.deepEqual(s.playableQuestions(st, 'e2').map((q) => q.id), [])
   assert.equal(s.mastery(st, 'e1'), 1 / 3)
@@ -420,11 +601,11 @@ test('playableQuestions / mastery / profileProgress', async () => {
 test('applyPull: gewähltes Kind bleibt, unbekanntes -> erstes Kind', async () => {
   const s = await freshStore({ 'braincraft:profile': KID2 })
   handler = defaultHandler
-  await s.connect(CODE)
+  await signIn(s)
   assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID2)
   assert.equal(mem.get('braincraft:name'), 'Ben')
   const s2 = await freshStore({ 'braincraft:profile': 'weg' })
-  await s2.connect(CODE)
+  await signIn(s2)
   assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID)
 })
 
@@ -433,7 +614,7 @@ async function parentStore(storage: Record<string, unknown> = {}) {
   const s = await freshStore(storage)
   const TOK = 'b'.repeat(64)
   handler = (fn, args) => (fn === 'bc_parent_unlock' ? json({ ok: true, token: TOK, expires_at: 'x' }) : defaultHandler(fn, args))
-  await s.connect(CODE)
+  await signIn(s)
   await s.parentUnlock('4711')
   calls = []
   return { s, TOK }
@@ -537,7 +718,7 @@ test('resetProgress: Erfolg, aber Nachladen scheitert -> trotzdem ok (keine fals
 
 test('flush: Schlange wird während einer Sendung ersetzt -> der neue Eintrag geht nicht verloren (slice(1)-Falle)', async () => {
   handler = defaultHandler
-  const s = await freshStore({ 'braincraft:code': CODE, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  const s = await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
   await tick(5)
   let release!: () => void
   const gate = new Promise<void>((r) => (release = r))
@@ -549,13 +730,17 @@ test('flush: Schlange wird während einer Sendung ersetzt -> der neue Eintrag ge
   calls = []
   s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: null }) // A, hängt
   await tick(5)
-  // Während A unterwegs ist: abmelden, neu verbinden, neue Antwort C
-  s.disconnect()
-  await s.connect(CODE)
+  // Während A unterwegs ist: abmelden, neu anmelden, neue Antwort C
+  s.authChanged(null)
+  s.forgetDevice(true)
+  // Neu anmelden: der Abgleich wartet auf die laufende Sendung A, daher nicht vorher abwarten
+  const linked = signIn(s)
+  await tick(5)
   s.selectProfile(KID)
   s.queueAnswer({ questionId: 'q2', correct: true, firstTry: true, mode: 'solo', roundId: null }) // C
   await tick(5)
   release()
+  await linked
   await tick(20)
   await s.flush()
   assert.ok(answers().some((c) => c.args.p_question_id === 'q2'), 'C wurde gesendet')
