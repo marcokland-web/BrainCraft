@@ -35,7 +35,7 @@ const winListeners: Record<string, (() => void)[]> = {}
 g.window = { addEventListener: (t: string, f: () => void) => (winListeners[t] ??= []).push(f) }
 
 // ---------- Gemocktes fetch ----------
-type Call = { fn: string; args: any }
+type Call = { fn: string; args: any; headers: Record<string, string> }
 let calls: Call[] = []
 type Handler = (fn: string, args: any) => Promise<Response> | Response
 let handler: Handler = () => json(null)
@@ -46,7 +46,7 @@ g.fetch = async (url: string, init: any) => {
   const fn = String(url).split('/rpc/')[1]
   const args = JSON.parse(init.body)
   if (netDown) throw new TypeError('Failed to fetch')
-  calls.push({ fn, args })
+  calls.push({ fn, args, headers: { ...(init.headers ?? {}) } })
   return handler(fn, args)
 }
 void realFetch
@@ -59,6 +59,7 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms))
 const KID = '11111111-1111-1111-1111-111111111111'
 const KID2 = '22222222-2222-2222-2222-222222222222'
 const FAM = 'f0000000-0000-4000-8000-000000000001'
+const DEV = 'd'.repeat(64)
 const USER = { id: 'u0000000-0000-4000-8000-000000000001', email: 'eltern@example.org' }
 function fakePull(over: any = {}) {
   return {
@@ -113,12 +114,15 @@ let sessionFamily: string | null = FAM
 const defaultHandler: Handler = (fn) => {
   if (fn === 'bc_session') return json({ family_id: sessionFamily })
   if (fn === 'bc_my_invites') return json([])
+  if (fn === 'bc_device_from_code') return json({ ok: true, device_token: DEV, family_id: FAM })
+  if (fn === 'bc_device_hello') return json({ family_id: FAM })
   if (fn === 'bc_pull') return json(fakePull())
   if (fn === 'bc_answer') return json({ ok: true })
   if (fn === 'bc_round_finish') return json({ ok: true })
   return json(null)
 }
 const queueLS = () => JSON.parse(mem.get('braincraft:queue') ?? '[]')
+const fa = (c: Call) => ({ fn: c.fn, args: c.args })
 const answers = () => calls.filter((c) => c.fn === 'bc_answer')
 
 // ---------- api.ts ----------
@@ -374,10 +378,10 @@ test('Einladung: nie still annehmen; acceptInvite erst auf Tipp, declineInvite',
   assert.equal(mem.get('braincraft:family'), undefined)
   calls = []
   await s.declineInvite(FAM)
-  assert.deepEqual(calls[0], { fn: 'bc_invite_decline', args: { p_family_id: FAM } })
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_invite_decline', args: { p_family_id: FAM } })
   calls = []
   await s.acceptInvite(FAM)
-  assert.deepEqual(calls[0], { fn: 'bc_invite_accept', args: { p_family_id: FAM } })
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_invite_accept', args: { p_family_id: FAM } })
   assert.equal(calls.at(-1)!.fn, 'bc_pull')
   assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
   sessionFamily = FAM
@@ -400,7 +404,7 @@ test('createFamily: bc_family_create mit Name und PIN, danach Familie und bc_pul
   await signIn(s)
   calls = []
   await s.createFamily('Lia', '1234')
-  assert.deepEqual(calls[0], { fn: 'bc_family_create', args: { p_child_name: 'Lia', p_pin: '1234' } })
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_family_create', args: { p_child_name: 'Lia', p_pin: '1234' } })
   assert.equal(calls.at(-1)!.fn, 'bc_pull')
   assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
   assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID2, 'neues Kind gewählt')
@@ -408,53 +412,128 @@ test('createFamily: bc_family_create mit Name und PIN, danach Familie und bc_pul
   handler = defaultHandler
 })
 
-test('früherer Familien-Code: wird gelöscht, Stand und Schlange bleiben bis zur Anmeldung, dann gesendet', async () => {
+test('Altgerät: Familien-Code wird beim Start gegen ein Geräte-Token getauscht, Stand und Schlange bleiben und gehen raus', async () => {
   handler = defaultHandler
   const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' }]
-  const s = await freshStore({ 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
-  assert.equal(mem.get('braincraft:code'), undefined, 'Code gelöscht')
-  assert.ok(mem.get('braincraft:pull'), 'Stand bleibt')
-  assert.equal(calls.length, 0, 'ohne Anmeldung keine Anfrage')
-  await signIn(s)
-  await tick(10)
-  assert.deepEqual(answers().map((c) => c.args.p_answer_id), ['a1'], 'alte Antwort nach Anmeldung gesendet')
+  await freshStore({ 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': fakePull({ family_id: undefined }), 'braincraft:queue': q })
+  await tick(20)
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_device_from_code', args: { p_code: 'ABCD-EFGH-JKMN-PQRS-TUVW', p_name: null } })
+  assert.equal(mem.get('braincraft:code'), undefined, 'Code nach dem Tausch gelöscht')
+  assert.equal(JSON.parse(mem.get('braincraft:device')!), DEV, 'Geräte-Token gespeichert')
+  assert.deepEqual(answers().map((c) => c.args.p_answer_id), ['a1'], 'alte Antwort gesendet')
+  assert.equal(answers()[0].headers['x-bc-device'], DEV, 'mit Geräte-Token im Header')
+  assert.equal(answers()[0].headers.Authorization, undefined, 'ohne Google-Sitzung')
   assert.equal(queueLS().length, 0)
 })
 
-test('anderes Konto mit anderer Familie: alter Stand und Schlange werden verworfen', async () => {
-  handler = defaultHandler
-  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: '2026-10-24T07:00:00Z', roundId: 'r' }]
-  await freshStore()
-  mem.set('braincraft:profile', JSON.stringify(KID))
-  mem.set('braincraft:pull', JSON.stringify(fakePull({ family_id: 'f-alt' })))
-  mem.set('braincraft:family', JSON.stringify('f-alt'))
-  const OTHER = 'f0000000-0000-4000-8000-000000000002'
-  const KID3 = '33333333-3333-3333-3333-333333333333'
-  handler = (fn, args) => {
-    if (fn === 'bc_session') return json({ family_id: OTHER })
-    if (fn === 'bc_pull') return json(fakePull({ family_id: OTHER, profiles: [{ id: KID3, child_name: 'Mo', avatar_id: 'a', stars_balance: 0, stars_today: 0, learn_days_week: 0 }] }))
-    return defaultHandler(fn, args)
-  }
-  // Modul neu laden, damit der gespeicherte Familienwechsel greift
-  mem.set('braincraft:queue', JSON.stringify(q))
-  const s2 = (await import(`../src/lib/store.ts?n=${++n}`)) as typeof import('../src/lib/store.ts')
-  calls = []
-  await signIn(s2)
-  await tick(10)
-  assert.equal(answers().length, 0, 'Antwort der alten Familie nie gesendet')
-  assert.equal(JSON.parse(mem.get('braincraft:family')!), OTHER)
-  assert.equal(JSON.parse(mem.get('braincraft:profile')!), KID3)
+test('Altgerät: Tausch scheitert (008 eingespielt) -> Zugang „neu verbinden“, nichts gelöscht', async () => {
+  handler = (fn, args) => (fn === 'bc_device_from_code' ? json({ code: 'PGRST202', message: 'x' }, 404) : defaultHandler(fn, args))
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: 'x', roundId: 'r' }]
+  const s = await freshStore({ 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  await tick(20)
+  assert.equal(s.getState().access, 'revoked')
+  assert.equal(queueLS().length, 1, 'Schlange bleibt')
+  assert.ok(mem.get('braincraft:pull'), 'Stand bleibt')
   handler = defaultHandler
 })
 
-test('no_family beim Abgleich (Elternteil entfernt): Stand vom Gerät gelöscht', async () => {
+test('Koppeln: Code einlösen -> Geräte-Token, Familie, Abgleich mit Header; falscher Code -> Fehler, nichts gespeichert', async () => {
+  handler = (fn, args) => {
+    if (fn === 'bc_pair_redeem') return json(args.p_pair_code === 'ABCDE-FGHJK' ? { ok: true, device_token: DEV, family_id: FAM } : { ok: false, error: 'pair_invalid' })
+    return defaultHandler(fn, args)
+  }
+  const s = await freshStore()
+  assert.equal(await s.pairDevice('ZZZZZ-ZZZZZ'), 'pair_invalid')
+  assert.equal(mem.get('braincraft:device'), undefined)
+  calls = []
+  assert.equal(await s.pairDevice('ABCDE-FGHJK'), null)
+  assert.equal(JSON.parse(mem.get('braincraft:device')!), DEV)
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
+  const pull = calls.find((c) => c.fn === 'bc_pull')!
+  assert.equal(pull.headers['x-bc-device'], DEV)
+  assert.equal(calls.find((c) => c.fn === 'bc_pair_redeem')!.headers['x-bc-device'], undefined, 'Einlösen ohne altes Token')
+  handler = defaultHandler
+})
+
+test('Kinder-Gerät entfernt: Zugang „revoked“, Kind spielt weiter, Antworten bleiben liegen', async () => {
+  handler = defaultHandler
+  const s = await freshStore({ 'braincraft:device': DEV, 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  await tick(10)
+  assert.ok(calls.some((c) => c.fn === 'bc_device_hello'))
+  handler = (fn, args) => (fn === 'bc_answer' ? err('device_revoked') : defaultHandler(fn, args))
+  s.queueAnswer({ questionId: 'q1', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
+  await tick(10)
+  assert.equal(s.getState().access, 'revoked')
+  assert.equal(queueLS().length, 1)
+  calls = []
+  s.queueAnswer({ questionId: 'q2', correct: true, firstTry: true, mode: 'solo', roundId: 'r' })
+  await tick(10)
+  assert.equal(calls.length, 0, 'ohne Zugang keine Anfragen')
+  assert.equal(queueLS().length, 2)
+  // Neu gekoppelt (gleiche Familie): Schlange geht raus
+  handler = (fn, args) => (fn === 'bc_pair_redeem' ? json({ ok: true, device_token: 'e'.repeat(64), family_id: FAM }) : defaultHandler(fn, args))
+  assert.equal(await s.pairDevice('ABCDE-FGHJK'), null)
+  await tick(10)
+  assert.equal(queueLS().length, 0)
+  assert.equal(answers().at(-1)!.headers['x-bc-device'], 'e'.repeat(64))
+  handler = defaultHandler
+})
+
+test('Koppeln mit Code einer anderen Familie: Rückfrage, nichts gesendet; Bestätigen löscht und übernimmt', async () => {
+  const OTHER = 'f0000000-0000-4000-8000-000000000002'
+  handler = (fn, args) => {
+    if (fn === 'bc_pair_redeem') return json({ ok: true, device_token: 'e'.repeat(64), family_id: OTHER })
+    if (fn === 'bc_pull') return json(fakePull({ family_id: OTHER }))
+    return defaultHandler(fn, args)
+  }
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: 'x', roundId: 'r' }]
+  const s = await freshStore({ 'braincraft:device': DEV, 'braincraft:family': FAM, 'braincraft:access': 'revoked', 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  await tick(10)
+  calls = []
+  assert.equal(await s.pairDevice('ABCDE-FGHJK'), null)
+  assert.equal(s.getState().conflict?.family, OTHER)
+  assert.equal(answers().length, 0, 'nichts an die fremde Familie')
+  assert.equal(JSON.parse(mem.get('braincraft:device')!), DEV, 'altes Token bleibt bis zur Entscheidung')
+  await s.resolveConflict(true)
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), OTHER)
+  assert.equal(queueLS().length, 0, 'alter Stand nach Bestätigung gelöscht')
+  handler = defaultHandler
+})
+
+test('Google: anderes Konto mit anderer Familie -> Rückfrage statt still löschen; Abbrechen behält', async () => {
+  const OTHER = 'f0000000-0000-4000-8000-000000000002'
+  handler = (fn, args) => (fn === 'bc_session' ? json({ family_id: OTHER }) : defaultHandler(fn, args))
+  const q = [{ kind: 'answer', id: 'a1', profileId: KID, questionId: 'q1', correct: true, firstTry: true, mode: 'solo', at: 'x', roundId: 'r' }]
+  const s = await freshStore({ 'braincraft:family': FAM, 'braincraft:profile': KID, 'braincraft:pull': fakePull(), 'braincraft:queue': q })
+  await tick(10)
+  assert.equal(s.getState().conflict?.family, OTHER)
+  assert.equal(answers().length, 0)
+  await s.resolveConflict(false)
+  assert.equal(JSON.parse(mem.get('braincraft:family')!), FAM)
+  assert.equal(queueLS().length, 1, 'Stand bleibt nach Abbrechen')
+  handler = defaultHandler
+})
+
+test('no_family beim Abgleich (Elternteil entfernt): Stand und Schlange bleiben, Zugang „no_family“', async () => {
   handler = defaultHandler
   const s = await freshStore()
   await signIn(s)
   handler = (fn, args) => (fn === 'bc_pull' ? err('no_family') : defaultHandler(fn, args))
   await s.refresh()
-  for (const k of ['braincraft:family', 'braincraft:profile', 'braincraft:pull']) assert.equal(mem.get(k), undefined, k)
+  for (const k of ['braincraft:family', 'braincraft:profile', 'braincraft:pull']) assert.ok(mem.get(k), k)
+  assert.equal(s.getState().access, 'no_family')
   handler = defaultHandler
+})
+
+test('Google-Sitzung geht unfreiwillig verloren: Zugang „expired“, Daten bleiben; bewusst abgemeldet: ebenso, ohne Löschen', async () => {
+  handler = defaultHandler
+  const s = await freshStore()
+  await signIn(s)
+  s.authChanged(null)
+  assert.equal(s.getState().access, 'expired')
+  assert.ok(mem.get('braincraft:pull'))
+  await signIn(s)
+  assert.equal(s.getState().access, 'ok', 'wieder angemeldet')
 })
 
 test('not_signed_in beim Senden: Antwort bleibt in der Schlange', async () => {
@@ -571,10 +650,10 @@ test('parentUnlock: Token nur im Speicher, bc_pull mit Token, Sperre, parentLock
   assert.ok(![...mem.values()].some((v) => v.includes(TOK)), 'Token nicht in localStorage')
   calls = []
   await s.setQuestionStatus(['q4'], 'freigegeben')
-  assert.deepEqual(calls[0], { fn: 'bc_question_set_status', args: { p_token: TOK, p_ids: ['q4'], p_status: 'freigegeben' } })
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_question_set_status', args: { p_token: TOK, p_ids: ['q4'], p_status: 'freigegeben' } })
   calls = []
   await s.setQuestionActive('q4', false)
-  assert.deepEqual(calls[0], { fn: 'bc_question_set_active', args: { p_token: TOK, p_id: 'q4', p_active: false } })
+  assert.deepEqual(fa(calls[0]), { fn: 'bc_question_set_active', args: { p_token: TOK, p_id: 'q4', p_active: false } })
   calls = []
   s.parentLock()
   await tick(10)

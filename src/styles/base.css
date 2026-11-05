@@ -431,3 +431,22 @@ dialog.confirm .st-grab{display:none}
 .parents .scan-code{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:6px 6px 6px 12px;border-radius:var(--r-s);background:var(--fill)}
 .parents .scan-code code{flex:1;min-width:0;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;user-select:all}
 .parents .scan-code .btn{min-height:44px;flex:none;font-size:15px}
+
+/* Kinder-Geräte koppeln (Eltern-Cockpit) und verbinden (Kinder-Gerät) */
+.pair-form .pair-input{font:600 24px/1.2 var(--f-round);letter-spacing:.08em;text-align:center;text-transform:uppercase}
+.pair-show{display:grid;gap:12px;justify-items:center;text-align:center}
+.pair-show p{margin:0}
+.pair-code{margin:0;padding:12px 16px;border-radius:var(--r-m);background:var(--fill);font:700 30px/1.2 var(--f-round);letter-spacing:.08em;user-select:all;max-width:100%;overflow-wrap:anywhere}
+.pair-qr{width:min(220px,60vw);height:auto;border-radius:12px;border:1px solid var(--line)}
+.pair-show .setup-acts{width:100%}
+.pair-create{display:grid;gap:12px}
+.devices .devices-acts{margin-top:12px}
+.parents .parents-note{margin:0 4px}
+.reconnect .setup-acts{max-width:440px;width:100%;margin:0 auto}
+.reconnect .reconnect-help{margin:0 4px}
+/* Lange Adressen dürfen nichts sprengen (Bodo C5) */
+.acc-row .tx,.parents .approve-q,.setup-invite p,.setup .setup-form p{min-width:0;overflow-wrap:anywhere}
+.acc-row .tx b,.parents .approve-q b{overflow-wrap:anywhere;word-break:break-word}
+/* Rückfragen mit langen Adressen sprengen die Breite nicht (iPhone) */
+dialog.confirm,dialog.confirm .st{min-width:0;max-width:calc(100vw - 32px)}
+dialog.confirm p{overflow-wrap:anywhere}

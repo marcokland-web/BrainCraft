@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AccountRow } from '../components/Account'
 import { Chevron, Logo } from '../components/Icons'
 import { Sheet } from '../components/Sheet'
@@ -6,8 +6,10 @@ import { ApiError } from '../lib/api'
 import { signInWithGoogle, signOutDevice, useAuth } from '../lib/auth'
 import { useT } from '../lib/i18n'
 import { acceptInvite, createFamily, declineInvite, linkSession, useStore } from '../lib/store'
+import { PairForm, pendingPairCode } from './Connect'
 
-// Einrichten (Eltern): Gerät einmal mit Google anmelden, beim ersten Mal Familie anlegen, oder Probemodus.
+// Einrichten: Kinder-Gerät mit dem Code vom Eltern-Gerät verbinden (ohne Google), Eltern-Gerät mit Google
+// anmelden (beim ersten Mal Familie anlegen oder Einladung annehmen), oder Probemodus.
 // Hier darf getippt werden; Zero-Typing gilt für das Kind im Spiel. Ist das Gerät angemeldet und gehört
 // das Konto zu einer Familie, erscheint diese Ansicht nie (App zeigt direkt das Spiel).
 
@@ -52,6 +54,9 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
   const [pin, setPin] = useState('')
   const [pin2, setPin2] = useState('')
   const [askDecline, setAskDecline] = useState<string | null>(null)
+  // Fehler beim Anlegen nur im Formular, nicht in den Einladungskarten (Bodo C7)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [pairing, setPairing] = useState(() => !!pendingPairCode())
 
   function message(e: unknown) {
     if (!(e instanceof ApiError)) return t.errGeneric
@@ -92,15 +97,15 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
 
   async function doCreate() {
     const name = child.trim()
-    if (!name || name.length > 30) return setError(t.errName)
-    if (!/^[0-9]{4}$/.test(pin)) return setError(t.errPinFormat)
-    if (pin !== pin2) return setError(t.errPinMatch)
+    if (!name || name.length > 30) return setCreateError(t.errName)
+    if (!/^[0-9]{4}$/.test(pin)) return setCreateError(t.errPinFormat)
+    if (pin !== pin2) return setCreateError(t.errPinMatch)
     setBusy(true)
-    setError(null)
+    setCreateError(null)
     try {
       await createFamily(name, pin)
     } catch (e) {
-      setError(message(e))
+      setCreateError(message(e))
     } finally {
       setBusy(false)
     }
@@ -118,11 +123,29 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
   }
 
   const signedIn = auth.ready && !!auth.user
+
+  // Nach der Anmeldung offline: alle 5 s erneut nach der Familie fragen, bis das Netz zurück ist
+  useEffect(() => {
+    if (!(signedIn && !s.needsFamily && s.offline)) return
+    const id = window.setInterval(() => void linkSession().catch(() => undefined), 5000)
+    return () => window.clearInterval(id)
+  }, [signedIn, s.needsFamily, s.offline])
   // Angemeldet, Familie wird gerade erfragt (oder offline nicht erreichbar)
   const linking = signedIn && !s.needsFamily
-  const authError = auth.error === 'cancelled' ? t.authCancelled : auth.error === 'no_access' ? t.authNoAccess : auth.error === 'failed' ? t.authFailed : null
-  // Früher verbunden (alter Code) oder abgemeldet mit behaltenem Stand: Kind sieht freundlichen Hinweis
-  const intro = s.legacy ? t.legacyText : s.family ? t.relinkText : t.welcomeText
+  const authError = auth.error === 'cancelled' ? t.authCancelled
+    : auth.error === 'no_access' ? `${t.authNoAccess} ${t.authNoAccessHint}`
+    : auth.error === 'expired' ? t.authExpired
+    : auth.error === 'offline' ? t.errOffline
+    : auth.error === 'failed' ? t.authFailed : null
+  const intro = t.welcomeText
+
+  if (pairing) {
+    return (
+      <section className="bc-view setup">
+        <PairForm onCancel={() => setPairing(false)} />
+      </section>
+    )
+  }
 
   return (
     <section className="bc-view setup">
@@ -140,8 +163,14 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
 
       {auth.ready && !signedIn && (
         <>
+          <div className="list">
+            <button type="button" className="row" onClick={() => setPairing(true)}>
+              <span className="tx"><b>{t.connectRow}</b><small>{t.connectRowSub}</small></span>
+              <Chevron />
+            </button>
+          </div>
           <div className="card setup-form setup-signin">
-            <p>{t.signInText}</p>
+            <p>{t.googleCardText}</p>
             <GoogleButton />
             {authError && <p className="setup-err" role="alert">{authError}</p>}
           </div>
@@ -200,11 +229,11 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
             <span>{t.repeatPin}</span>
             <input value={pin2} onChange={(e) => setPin2(e.target.value.replace(/\D/g, '').slice(0, 4))} inputMode="numeric" type="password" autoComplete="new-password" />
           </label>
-          {error && !s.invites.length && <p className="setup-err" role="alert">{error}</p>}
+          {createError && <p className="setup-err" role="alert">{createError}</p>}
           <div className="setup-acts">
             {/* Höchstens ein gefüllter Hauptknopf je Ansicht: mit Einladung ist „Annehmen“ der Hauptknopf */}
             <button type="submit" className={`btn ${s.invites.length ? 'tinted' : 'primary'} wide`} disabled={busy}>{t.create}</button>
-            <button type="button" className="btn plain wide" disabled={busy} onClick={() => { setError(null); void signOutDevice() }}>{t.otherAccount}</button>
+            <button type="button" className="btn plain wide" disabled={busy} onClick={() => { setCreateError(null); void signOutDevice() }}>{t.otherAccount}</button>
           </div>
           {!s.invites.length && <p className="muted setup-note">{t.invitedHint}</p>}
         </form>

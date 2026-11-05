@@ -77,7 +77,9 @@ function basePull() {
 // ---------- Fake-Server ----------
 function makeServer() {
   // family: Familie des angemeldeten Kontos (null = Konto ohne Familie); auth: Optionen für fake-auth (deny, log)
-  const srv = { calls: [], down: false, data: basePull(), pullDelay: 0, family: FAMILY, auth: { log: [] }, invites: [], myInvites: [] }
+  const srv = { calls: [], down: false, data: basePull(), pullDelay: 0, family: FAMILY, auth: { log: [] }, invites: [], myInvites: [],
+    // Kinder-Geräte: Token → { family, name, revoked }, Einmal-Codes → Name, gültige Familien-Codes (Altgeräte)
+    devices: new Map(), pairCodes: new Map(), legacyCodes: new Set(['ABCD-EFGH-JKMN-PQRS-TUVW']) }
   srv.handle = async (route) => {
     const req = route.request()
     const url = req.url()
@@ -89,9 +91,52 @@ function makeServer() {
     const reply = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body) })
     const fail = (message) => reply({ code: 'P0001', message }, 400)
     if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST' } })
-    // Ohne Zugangstoken verweigert PostgREST die Funktionen (nur für angemeldete Konten, Migration 007)
-    if (!bearerOk(route)) return reply({ code: '42501', message: `permission denied for function ${fn}` }, 401)
+    // Kinder-Gerät: Token im Header x-bc-device, ohne Google-Sitzung (Migration 007)
+    const devTok = req.headers()['x-bc-device']
+    const dev = devTok ? srv.devices.get(devTok) : null
+    const newToken = () => [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('')
+    if (fn === 'bc_pair_redeem') {
+      const c = String(args.p_pair_code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+      const name = srv.pairCodes.get(c)
+      if (!name) return reply({ ok: false, error: 'pair_invalid' })
+      srv.pairCodes.delete(c)
+      const tok = newToken()
+      srv.devices.set(tok, { family: srv.pairFamily ?? FAMILY, name, revoked: false })
+      return reply({ ok: true, device_token: tok, device_id: `dev-${srv.devices.size}`, family_id: srv.pairFamily ?? FAMILY, name })
+    }
+    if (fn === 'bc_device_from_code') {
+      if (srv.legacyGone) return reply({ code: 'PGRST202', message: 'Could not find the function' }, 404)
+      if (!srv.legacyCodes.has(args.p_code)) return reply({ ok: false, error: 'pair_invalid' })
+      const tok = newToken()
+      srv.devices.set(tok, { family: FAMILY, name: 'Altes Gerät', revoked: false })
+      return reply({ ok: true, device_token: tok, device_id: 'dev-alt', family_id: FAMILY })
+    }
+    if (devTok) {
+      if (!dev) return fail('device_unknown')
+      if (dev.revoked) return fail('device_revoked')
+      if (route.request().headers().authorization) return fail('device_with_google')
+      if (/^bc_(session|my_invites|invite_|family_create|parents|parent_invite|parent_remove|pair_create|devices|device_revoke)/.test(fn)) return reply({ code: '42501', message: `permission denied for function ${fn}` }, 401)
+      if (fn === 'bc_device_hello') return reply({ family_id: dev.family, name: dev.name })
+      if (fn === 'bc_device_leave') { dev.revoked = true; return reply(true) }
+    } else if (!bearerOk(route)) return reply({ code: '42501', message: `permission denied for function ${fn}` }, 401)
     if ('p_code' in args) return fail('p_code_not_expected')
+    if (fn === 'bc_pair_create') {
+      if (args.p_token !== TOKEN) return fail('pin_required')
+      const code = 'ABCDE' + String(10000 + srv.pairCodes.size).slice(-5).replace(/[01]/g, 'X')
+      srv.pairCodes.set(code, args.p_name)
+      return reply({ code: `${code.slice(0, 5)}-${code.slice(5)}`, expires_at: new Date(Date.now() + 600000).toISOString() })
+    }
+    if (fn === 'bc_devices') {
+      if (args.p_token !== TOKEN) return fail('pin_required')
+      return reply([...srv.devices.entries()].map(([tok, d], i) => ({ id: `dev-${i}`, tok, name: d.name, created_at: later, last_seen_at: later, revoked_at: d.revoked ? later : null })))
+    }
+    if (fn === 'bc_device_revoke') {
+      if (args.p_token !== TOKEN) return fail('pin_required')
+      const e = [...srv.devices.values()][Number(String(args.p_device_id).split('-')[1])]
+      if (!e) return fail('not_found')
+      e.revoked = true
+      return reply(true)
+    }
     if (fn === 'bc_session') return reply({ family_id: srv.family })
     if (fn === 'bc_my_invites') return reply(srv.family ? [] : srv.myInvites)
     if (fn === 'bc_invite_accept') {
@@ -236,7 +281,7 @@ async function open({ size = 'iphone', storage = {}, raw = {}, lang = 'de', them
   const page = await ctx.newPage()
   // WebKit meldet bei page.screenshot eine CSP-Meldung zu Stylesheets: Das ist Playwright, kein App-Fehler (Gegenprobe ohne Screenshot)
   const shotNoise = (t) => process.env.BROWSER === 'webkit' && /^Refused to apply a stylesheet because its hash/.test(t)
-  page.on('console', (m) => { if (m.type() === 'error' && !shotNoise(m.text()) && !/Failed to load resource: (the server responded with a status of (400|500)|net::ERR_INTERNET_DISCONNECTED)/.test(m.text())) consoleErrors.push(`${size}/${lang}: ${m.text()}`) })
+  page.on('console', (m) => { if (m.type() === 'error' && !shotNoise(m.text()) && !/Failed to load resource: (the server responded with a status of (400|404|500)|net::ERR_INTERNET_DISCONNECTED)/.test(m.text())) consoleErrors.push(`${size}/${lang}: ${m.text()}`) })
   page.on('pageerror', (e) => consoleErrors.push(`${size}/${lang} pageerror: ${e.message}`))
   await page.goto(BASE)
   await page.waitForLoadState('networkidle')
@@ -368,7 +413,7 @@ console.log('1. Setup (Anmeldung mit Google)')
   const { ctx, page } = await open({ srv })
   await googleBtn(page).click()
   await page.locator('[role=alert]').waitFor({ timeout: 5000 }).catch(() => {})
-  ok('Kein Zugang: „Kein Zugang – bitte von der Familie freischalten lassen.“', (await page.locator('[role=alert]').innerText().catch(() => '')) === 'Kein Zugang – bitte von der Familie freischalten lassen.')
+  ok('Kein Zugang: „Kein Zugang – bitte von der Familie freischalten lassen.“', (await page.locator('[role=alert]').innerText().catch(() => '')).startsWith('Kein Zugang – bitte von der Familie freischalten lassen. Dieses Konto ist noch nicht freigeschaltet.'))
   ok('Kein Zugang: keine Sitzung, kein bc_session', !(await ls(page, 'braincraft-auth')) && !srv.calls.some((c) => c.fn === 'bc_session'))
   await ctx.close()
 }
@@ -433,14 +478,75 @@ console.log('1. Setup (Anmeldung mit Google)')
   await ctx.close()
 }
 {
-  // Früher mit Familien-Code verbunden: Stand bleibt, einmal mit Google anmelden
+  // Früher mit Familien-Code verbunden: Code wird einmalig gegen ein Geräte-Token getauscht, ohne Google
   const srv = makeServer()
-  const { ctx, page } = await open({ srv, storage: { 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': basePull() } })
-  ok('Alter Code: Hinweis auf neue Anmeldung', (await page.locator('.setup').innerText()).includes('neue Anmeldung'))
-  ok('Alter Code: gelöscht, Stand bleibt', (await ls(page, 'braincraft:code')) === null && !!(await ls(page, 'braincraft:pull')))
-  await googleBtn(page).click()
+  const q = [{ kind: 'answer', id: 'aaaaaaaa-0000-4000-8000-000000000009', profileId: KID, questionId: 'n1', correct: true, firstTry: true, mode: 'solo', at: new Date().toISOString(), roundId: null }]
+  const { ctx, page } = await open({ srv, storage: { 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': basePull(), 'braincraft:queue': q } })
   await page.locator('.home').waitFor({ timeout: 5000 }).catch(() => {})
-  ok('Alter Code: nach Google-Anmeldung direkt im Spiel (Familie übernommen)', (await page.locator('.home').count()) === 1 && JSON.parse(await ls(page, 'braincraft:family')) === FAMILY)
+  await wait(500)
+  ok('Alter Code: getauscht, direkt im Spiel, keine Google-Anmeldung', (await page.locator('.home').count()) === 1 && !srv.auth.log.length && srv.calls.some((c) => c.fn === 'bc_device_from_code'))
+  ok('Alter Code: Code gelöscht, Geräte-Token und Familie gespeichert', (await ls(page, 'braincraft:code')) === null && /^"[0-9a-f]{64}"$/.test(await ls(page, 'braincraft:device')) && JSON.parse(await ls(page, 'braincraft:family')) === FAMILY)
+  ok('Alter Code: wartende Antwort mit Geräte-Token gesendet', answersOf(srv).length === 1 && (JSON.parse((await ls(page, 'braincraft:queue')) ?? '[]')).length === 0)
+  await ctx.close()
+}
+{
+  // Altgerät nach 008 (Tausch nicht mehr möglich): Kinderansicht, Stand bleibt, Eltern koppeln neu
+  const srv = makeServer()
+  srv.legacyGone = true
+  srv.pairCodes.set('ABCDEFGHJK', 'Lias iPad')
+  const { ctx, page } = await open({ srv, storage: { 'braincraft:code': 'ABCD-EFGH-JKMN-PQRS-TUVW', 'braincraft:profile': KID, 'braincraft:pull': basePull() }, raw: { 'braincraft:name': 'Lia' } })
+  await page.locator('.reconnect').waitFor({ timeout: 4000 }).catch(() => {})
+  const txt = await page.locator('.reconnect').innerText().catch(() => '')
+  ok('Altgerät ohne Tausch: „Gleich geht\'s weiter, Lia!“ ohne Eltern-Bedienung', txt.includes("Gleich geht's weiter, Lia!") && txt.includes('sicher gespeichert') && (await page.locator('.reconnect input').count()) === 0 && (await googleBtn(page).count()) === 0, txt.slice(0, 200))
+  await page.getByRole('button', { name: 'Ich bin Mama oder Papa' }).click()
+  await page.locator('.reconnect input').fill('abcde fghjk')
+  await page.getByRole('button', { name: 'Verbinden' }).click()
+  await page.locator('.home').waitFor({ timeout: 4000 }).catch(() => {})
+  ok('Altgerät: mit Code neu gekoppelt, Stand übernommen', (await page.locator('.home').count()) === 1 && srv.calls.some((c) => c.fn === 'bc_pair_redeem'))
+  await ctx.close()
+}
+{
+  // Kinder-Gerät per QR-Link koppeln (ohne Google), dann spielen; Cockpit dort ohne Konto-Verwaltung
+  const srv = makeServer()
+  srv.pairCodes.set('ABCDEFGHJK', 'Lias iPad')
+  const ctx = await browser.newContext({ viewport: SIZES.iphone, serviceWorkers: 'block' })
+  await ctx.route('**/*', (route) => {
+    const u = route.request().url()
+    if (u.startsWith(new URL(BASE).origin + '/')) return route.continue()
+    if (u.includes('.supabase.co/rest/v1/rpc/')) return srv.handle(route)
+    if (u.includes('.supabase.co/auth/v1/')) return authRoute(route, srv.auth)
+    foreign.push(u)
+    return route.abort()
+  })
+  const page = await ctx.newPage()
+  page.on('pageerror', (e) => consoleErrors.push(`koppeln pageerror: ${e.message}`))
+  await page.goto(BASE + '#pair=ABCDE-FGHJK')
+  await page.locator('.pair-form').waitFor({ timeout: 4000 }).catch(() => {})
+  ok('QR-Link: Formular mit übernommenem Code, Adresse ohne Code', (await page.locator('.pair-form input').inputValue().catch(() => '')) === 'ABCDE-FGHJK' && !page.url().includes('pair='), page.url())
+  await page.getByRole('button', { name: 'Verbinden' }).click()
+  await page.locator('.home').waitFor({ timeout: 4000 }).catch(() => {})
+  const pulls = srv.calls.filter((c) => c.fn === 'bc_pull')
+  ok('Gekoppelt: im Spiel, Geräte-Token gespeichert', (await page.locator('.home').count()) === 1 && /^"[0-9a-f]{64}"$/.test(await ls(page, 'braincraft:device') ?? ''))
+  ok('Gekoppelt: keine Google-Anmeldung, keine Google-Sitzung', srv.auth.log.length === 0 && !(await ls(page, 'braincraft-auth')) && pulls.length >= 1)
+  await page.locator('header .gear').click()
+  await page.locator('dialog.settings[open]').getByText('Eltern-Cockpit').first().click()
+  for (const d of '2468') await page.locator('.pin-keys .key', { hasText: new RegExp(`^${d}$`) }).click()
+  await page.locator('.approve, .bc-empty').first().waitFor({ timeout: 3000 }).catch(() => {})
+  const cp = await page.locator('.parents').innerText()
+  ok('Kinder-Gerät: PIN entsperrt das Cockpit, ohne Eltern-/Geräteverwaltung', cp.includes('mit Google-Anmeldung') && (await page.locator('.parents .family, .parents .devices').count()) === 0 && cp.includes('Gerät trennen'))
+  await page.getByRole('button', { name: 'Sperren', exact: true }).click()
+  // Gerät wird auf dem Eltern-Gerät entfernt, während das Kind spielt: Runde läuft weiter
+  await page.locator('.exam-row', { hasText: 'Normal-Arbeit' }).click()
+  await page.locator('.arena .a-card').waitFor()
+  for (const d of srv.devices.values()) d.revoked = true
+  await answer(page, 'right')
+  await wait(600)
+  ok('Gerät entfernt mitten in der Runde: Kind bleibt in der Runde', (await page.locator('.arena').count()) === 1 && (await page.locator('.reconnect').count()) === 0)
+  ok('Gerät entfernt: Antwort bleibt in der Schlange', JSON.parse((await ls(page, 'braincraft:queue')) ?? '[]').filter((x) => x.kind === 'answer').length === 1)
+  await page.locator('.arena button.x').first().click()
+  await page.locator('.reconnect').waitFor({ timeout: 3000 }).catch(() => {})
+  ok('Nach der Runde: Kinderansicht „Gleich geht\'s weiter, Lia!“', (await page.locator('.reconnect').innerText().catch(() => '')).includes("Gleich geht's weiter, Lia!"))
+  await page.screenshot({ path: join(SHOTS, 'kind-neu-verbinden-iphone.png') })
   await ctx.close()
 }
 {
@@ -598,7 +704,7 @@ async function playRound(page, plan) {
   await wait(300)
   const q = JSON.parse((await ls(page, 'braincraft:queue')) ?? '[]')
   ok('Offline: 4 Antworten in localStorage', q.filter((x) => x.kind === 'answer').length === 4, String(q.length))
-  await page.locator('.a-acts .btn.plain, .a-end .btn').last().click()
+  await page.locator('.a-acts .btn.plain, .a-end .btn').last().click({ force: true })
   await page.locator('.home').waitFor()
   ok('Offline: Start zeigt „4 Antworten warten auf Verbindung“', (await page.locator('.hero').innerText()).includes('4 Antworten warten'))
   srv.down = false
@@ -710,6 +816,37 @@ async function pin(page, digits) {
   await sheetDanger.click()
   await wait(400)
   ok('Zurückziehen: bc_parent_invite_delete, Liste ohne Einladung', srv.calls.some((c) => c.fn === 'bc_parent_invite_delete' && c.args.p_email === 'omatest@gmail.com') && !(await page.locator('.family').innerText()).includes('omatest@gmail.com'))
+  // Kinder-Geräte koppeln und entfernen
+  ok('Geräte: leerer Zustand', (await page.locator('.devices').innerText()).includes('Noch keine Kinder-Geräte'))
+  await page.locator('.devices').getByRole('button', { name: 'Gerät koppeln' }).click()
+  await page.locator('dialog.confirm[open] input').waitFor({ timeout: 2000 })
+  ok('Koppeln: Name vorbelegt „Kinder-iPad“', (await page.locator('dialog.confirm[open] input').inputValue()) === 'Kinder-iPad')
+  await page.locator('dialog.confirm[open] input').fill('Lias iPad')
+  srv.calls.length = 0
+  await page.getByRole('button', { name: 'Code erzeugen' }).click()
+  await page.locator('.pair-code').waitFor({ timeout: 2000 }).catch(() => {})
+  const pc = srv.calls.find((c) => c.fn === 'bc_pair_create')
+  const shownCode = (await page.locator('.pair-code').innerText().catch(() => '')).trim()
+  ok('Koppeln: bc_pair_create(p_token, p_name), Code XXXXX-XXXXX angezeigt', pc && pc.args.p_token === TOKEN && pc.args.p_name === 'Lias iPad' && /^[A-Z0-9]{5}-[A-Z0-9]{5}$/.test(shownCode), JSON.stringify(pc?.args) + ' ' + shownCode)
+  ok('Koppeln: QR-Code und Gültigkeit sichtbar', (await page.locator('dialog.confirm[open] svg.pair-qr path').count()) === 1 && (await page.locator('dialog.confirm[open]').innerText()).includes('Gilt bis'))
+  for (const [size] of Object.entries(SIZES)) {
+    await page.setViewportSize(SIZES[size])
+    await wait(100)
+    ok(`Koppeln ${size}: kein seitliches Scrollen`, await noHScroll(page))
+    await page.screenshot({ path: join(SHOTS, `koppeln-${size}.png`) })
+  }
+  await page.setViewportSize(SIZES.iphone)
+  // Kinder-Gerät löst den Code ein (Server-seitig nachgestellt), dann Liste neu laden
+  srv.devices.set('c'.repeat(64), { family: FAMILY, name: 'Lias iPad', revoked: false })
+  await page.getByRole('button', { name: 'Fertig' }).last().click()
+  await page.locator('.devices li').first().waitFor({ timeout: 2000 }).catch(() => {})
+  ok('Geräte: Liste mit Name und „zuletzt aktiv“', (await page.locator('.devices li').first().innerText().catch(() => '')).includes('Lias iPad') && (await page.locator('.devices').innerText()).includes('zuletzt aktiv'))
+  await page.locator('.devices li', { hasText: 'Lias iPad' }).getByRole('button', { name: 'Entfernen' }).click()
+  const devDanger = page.locator('dialog.confirm[open] .btn.danger')
+  ok('Gerät entfernen: Rückfrage mit rotem Knopf', /rgb\(179, 38, 30\)|rgb\(255, 138, 128\)/.test(await devDanger.evaluate((e) => getComputedStyle(e).backgroundColor).catch(() => '')))
+  await devDanger.click()
+  await wait(400)
+  ok('Gerät entfernen: bc_device_revoke, Gerät ungültig', srv.calls.some((c) => c.fn === 'bc_device_revoke') && srv.devices.get('c'.repeat(64)).revoked && (await page.locator('.devices').innerText()).includes('entfernt'))
   for (const [size] of Object.entries(SIZES)) {
     for (const theme of ['light', 'dark']) {
       await page.setViewportSize(SIZES[size])
@@ -745,11 +882,14 @@ async function pin(page, digits) {
   srv.auth.log.length = 0
   // Abmelden ohne Netz: signOut scheitert, die Sitzung wird trotzdem vom Gerät entfernt
   srv.auth.logoutDown = true
+  const t0 = Date.now()
   await page.locator('dialog.confirm[open]').getByRole('button', { name: 'Nur abmelden' }).click()
-  await page.locator('.setup').waitFor({ timeout: 3000 }).catch(() => {})
+  await page.locator('.reconnect').waitFor({ timeout: 6000 }).catch(() => {})
+  ok('Abmelden ohne Netz: höchstens 5 s', Date.now() - t0 <= 5000, `${Date.now() - t0} ms`)
   srv.auth.logoutDown = false
   ok('Nur abmelden (offline): Sitzung weg, Stand und Familie bleiben', !(await ls(page, 'braincraft-auth')) && !!(await ls(page, 'braincraft:pull')) && !!(await ls(page, 'braincraft:family')))
-  ok('Nur abmelden: Anmeldung mit freundlichem Hinweis fürs Kind', (await page.locator('.setup').innerText()).includes('Mama oder Papa') && (await googleBtn(page).count()) === 1)
+  ok('Nur abmelden: Kinderansicht mit freundlichem Hinweis', (await page.locator('.reconnect').innerText()).includes('Mama oder Papa') && (await googleBtn(page).count()) === 0)
+  await page.getByRole('button', { name: 'Ich bin Mama oder Papa' }).click()
   await googleBtn(page).click()
   await page.locator('.home').waitFor({ timeout: 5000 }).catch(() => {})
   ok('Wieder angemeldet: direkt im Spiel', (await page.locator('.home').count()) === 1)
@@ -960,7 +1100,7 @@ async function tryRedeem(page, title) {
   await tryRedeem(page, 'Lia-Buch')
   await askSheet(page).locator('[role=alert]').waitFor({ timeout: 3000 }).catch(() => {})
   ok('Schlange hängt: kein bc_redeem gesendet', redeemsOf(srv).length === 0, srv.calls.map((c) => c.fn).join(','))
-  ok('Schlange hängt: Meldung „Keine Verbindung“', (await askSheet(page).locator('[role=alert]').innerText().catch(() => '')).includes(T('errOffline')))
+  ok('Schlange hängt: Meldung „Keine Verbindung“', (await askSheet(page).locator('[role=alert]').innerText().catch(() => '')).includes(T('shopOffline')))
 
   // Antwort geht verloren, nachdem der Server gebucht hat: Wiederholung mit gleicher ID bucht nicht doppelt
   srv.answerDown = false
@@ -968,7 +1108,7 @@ async function tryRedeem(page, title) {
   srv.bookings = 0
   await askSheet(page).getByRole('button', { name: 'Ja, einlösen' }).click()
   await wait(500)
-  ok('Netzabbruch nach Buchung: Meldung „Keine Verbindung“', (await askSheet(page).locator('[role=alert]').innerText().catch(() => '')).includes(T('errOffline')))
+  ok('Netzabbruch nach Buchung: Meldung „Keine Verbindung“', (await askSheet(page).locator('[role=alert]').innerText().catch(() => '')).includes(T('shopOffline')))
   await askSheet(page).getByRole('button', { name: 'Ja, einlösen' }).click()
   await page.locator('.shop-voucher').waitFor({ timeout: 3000 }).catch(() => {})
   const ids = redeemsOf(srv).map((c) => c.args.p_redemption_id)
@@ -1049,7 +1189,7 @@ async function tryRedeem(page, title) {
     ['reward_not_found', T('errReward')],
     ['limit_reached', T('errVoucherLimit')],
     [500, T('errGeneric')],
-    ['offline', T('errOffline')],
+    ['offline', T('shopOffline')],
   ]
   for (const [code, text] of cases) {
     srv.redeemFail = code === 'offline' ? null : code

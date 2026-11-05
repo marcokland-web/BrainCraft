@@ -1,6 +1,7 @@
 -- =====================================================================
--- BrainCraft 007: Anmeldung mit Google statt Familien-Code (additiv)
--- Stand 03.11.2026 (Entscheidung von Marco: Familien-Code und Einladungscode fallen weg).
+-- BrainCraft 007: Eltern mit Google, Kinder-Geräte gekoppelt – statt Familien-Code (additiv)
+-- Stand 04.11.2026 (Entscheidungen von Marco 03.11. und 04.11.: Familien-Code und Einladungscode fallen weg;
+-- auf Kinder-Geräten keine Google-Sitzung, sie werden vom Eltern-Gerät gekoppelt).
 -- Ziel: Supabase-Projekt asfwbuptsfcrgmmgdgim. Setzt 001, 003-006 voraus (002 ruht weiterhin).
 -- NOCH NICHT EINGESPIELT. Datei ohne begin/commit: in EINER Transaktion einspielen
 -- (SQL-Editor mit begin/commit drumherum oder CLI-Lauf), vorher Probelauf mit Rücknahme.
@@ -20,8 +21,17 @@
 --    googlemail.com → gmail.com.
 --  * families.code_hash darf leer sein (neue Familien haben keinen Code mehr). Spalte, Tabelle
 --    invites und alle Funktionen mit p_code entfernt erst 008 (nach der Auslieferung).
---  * Neue Helfer braincraft.my_family() / my_parent(p_token): Familie über auth.uid() statt Code.
---    Fehlercodes: not_signed_in (kein angemeldetes Konto), no_family (Konto ohne Familie).
+--  * Kinder-Geräte: braincraft.devices (Geräte-Token nur als SHA-256), gekoppelt über einen Einmal-Code
+--    aus braincraft.pair_codes (10 Zeichen ohne verwechselbare Zeichen, 10 Minuten, einmal einlösbar),
+--    Fehlversuche gebremst über braincraft.pair_attempts (5 je IP und 15 min, 50 insgesamt je 15 min).
+--    Das Kinder-Gerät schickt sein Token im Header x-bc-device (nicht als Parameter: keine neuen
+--    Signaturen, Token nicht im Anfrage-Körper; CORS erlaubt den Header, geprüft 04.11.2026).
+--    Altgeräte tauschen ihren Familien-Code einmalig gegen ein Geräte-Token (bc_device_from_code,
+--    nur bis 008, gleiche Bremse).
+--  * Neue Helfer braincraft.my_family() / my_parent(p_token): Familie über das Geräte-Token
+--    (Header x-bc-device) oder sonst über auth.uid() (Eltern-Gerät mit Google).
+--    braincraft.my_google_family() / my_google_parent(p_token): nur Google-Konto (Eltern verwalten,
+--    Geräte koppeln und entfernen). Fehlercodes: not_signed_in, no_family, device_revoked, device_unknown.
 --  * Alle bisherigen bc_*-Funktionen mit p_code gibt es zusätzlich OHNE p_code (gleiche Namen,
 --    gleiche Logik, Familie über auth.uid()); bc_pull liefert zusätzlich family_id.
 --    Eltern-Rechte weiterhin nur mit Eltern-Token aus bc_parent_unlock(p_pin) (bcrypt-PIN,
@@ -30,7 +40,8 @@
 --    bc_invite_decline(p_family_id), bc_family_create(p_child_name, p_pin), bc_parents(p_token),
 --    bc_parent_invite(p_token, p_email), bc_parent_invite_delete(p_token, p_email),
 --    bc_parent_remove(p_token, p_user_id).
---  * Rechte: Funktionen ohne p_code nur für authenticated (und service_role), nicht für anon.
+--  * Rechte: Kinder- und PIN-Funktionen ohne p_code für anon (Kinder-Gerät mit Token) und authenticated;
+--    Konto-Funktionen (Eltern, Einladungen, Geräte, Familie anlegen) nur für authenticated.
 --    Die alten p_code-Funktionen behalten ihre Rechte bis 008, damit die ausgelieferte App
 --    bis zum Update weiterläuft.
 --  * Bestandsfamilie: Die (einzige) vorhandene Familie wird Marcos Konto zugeordnet
@@ -39,14 +50,23 @@
 --    Bei mehr als einer Familie bricht die Migration ab (Marco entscheidet).
 -- Schema-Muster wie bisher (Rechenstern): RLS an, KEINE Policies, keine Tabellenrechte für
 -- anon/authenticated; Zugriff nur über SECURITY-DEFINER-Funktionen, die auth.uid() prüfen.
--- Idempotent: IF NOT EXISTS, CREATE OR REPLACE, ON CONFLICT DO NOTHING.
+-- Idempotent: IF NOT EXISTS, CREATE OR REPLACE, ON CONFLICT DO NOTHING; auch nach 008 wiederholbar.
+-- Achtung: Der Before-User-Created-Hook (live) liest braincraft.parent_invites (email, expires_at) und
+-- braincraft.email_norm – diese Namen nicht ändern.
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
 -- Tabellen
 -- ---------------------------------------------------------------------
 
-alter table braincraft.families alter column code_hash drop not null;
+-- Nur solange die Spalte existiert (nach 008 gibt es sie nicht mehr; 007 bleibt wiederholbar)
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'braincraft' and table_name = 'families' and column_name = 'code_hash') then
+    alter table braincraft.families alter column code_hash drop not null;
+  end if;
+end $$;
 
 create table if not exists braincraft.family_parents (
   family_id uuid not null references braincraft.families(id) on delete cascade,
@@ -57,7 +77,7 @@ create table if not exists braincraft.family_parents (
 
 create table if not exists braincraft.parent_invites (
   family_id  uuid not null references braincraft.families(id) on delete cascade,
-  email      text not null check (length(email) between 3 and 254 and email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  email      text not null check (length(email) between 3 and 254 and email ~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$'),
   invited_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   expires_at timestamptz not null default now() + interval '14 days',
@@ -65,24 +85,66 @@ create table if not exists braincraft.parent_invites (
 );
 create index if not exists parent_invites_email_idx on braincraft.parent_invites (email);
 
+-- Gekoppelte Kinder-Geräte (Token nur als SHA-256; das Token selbst liegt nur auf dem Gerät)
+create table if not exists braincraft.devices (
+  id           uuid primary key default gen_random_uuid(),
+  family_id    uuid not null references braincraft.families(id) on delete cascade,
+  name         text not null default 'Kinder-Gerät' check (length(name) between 1 and 40),
+  token_hash   text not null unique check (token_hash ~ '^[0-9a-f]{64}$'),
+  created_at   timestamptz not null default now(),
+  last_seen_at timestamptz,
+  revoked_at   timestamptz
+);
+create index if not exists devices_family_idx on braincraft.devices (family_id);
+
+-- Einmal-Codes zum Koppeln (nur Hash, 10 Minuten, einmal)
+create table if not exists braincraft.pair_codes (
+  code_hash  text primary key check (code_hash ~ '^[0-9a-f]{64}$'),
+  family_id  uuid not null references braincraft.families(id) on delete cascade,
+  created_by uuid references auth.users(id) on delete set null,
+  name       text not null check (length(name) between 1 and 40),
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  used_at    timestamptz
+);
+create index if not exists pair_codes_family_idx on braincraft.pair_codes (family_id);
+
+-- Einlöse-Versuche (Bremse gegen Raten); Einträge älter als 1 Tag löschen die Funktionen selbst
+create table if not exists braincraft.pair_attempts (
+  id  bigserial primary key,
+  ip  text not null default '' check (length(ip) <= 64),
+  ok  boolean not null,
+  at  timestamptz not null default now()
+);
+create index if not exists pair_attempts_at_idx on braincraft.pair_attempts (at);
+
 alter table braincraft.family_parents enable row level security;
 alter table braincraft.parent_invites enable row level security;
+alter table braincraft.devices        enable row level security;
+alter table braincraft.pair_codes     enable row level security;
+alter table braincraft.pair_attempts  enable row level security;
 
 -- ---------------------------------------------------------------------
 -- Interne Helfer
 -- ---------------------------------------------------------------------
 
--- Adresse vergleichbar machen: klein, ohne Leer- und unsichtbare Zeichen (Zero-Width, BOM, weiches
--- Trennzeichen); bei Gmail ohne Punkte und +Zusatz (Google behandelt diese Schreibweisen als dieselbe
--- Adresse), googlemail.com → gmail.com. Gleiche Regel wie normEmail in src/lib/email.ts.
+-- Adresse vergleichbar machen, gleiche Regel wie normEmail in src/lib/email.ts (Zeichenliste dort gleich):
+-- Leer- und unsichtbare Zeichen weg (als chr(), keine literalen unsichtbaren Zeichen in dieser Datei),
+-- nur A–Z klein schreiben (ASCII, in JS gleich), bei gmail.com/googlemail.com ohne Punkte und +Zusatz,
+-- googlemail.com → gmail.com. Höchstens 320 Zeichen.
 create or replace function braincraft.email_norm(p_email text)
 returns text language plpgsql immutable set search_path = '' as $$
-declare v text := lower(regexp_replace(left(coalesce(p_email, ''), 320), '[[:space:]\u00A0\u00AD\u180E\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]', '', 'g'));
+declare
+  v_class text := '[' || chr(9) || '-' || chr(13) || chr(32) || chr(133) || chr(160) || chr(173) || chr(5760)
+                  || chr(6158) || chr(8192) || '-' || chr(8207) || chr(8232) || '-' || chr(8239) || chr(8287)
+                  || chr(8288) || '-' || chr(8292) || chr(12288) || chr(65279) || ']';
+  v text := translate(regexp_replace(left(coalesce(p_email, ''), 320), v_class, '', 'g'),
+                      'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
   v_local text; v_domain text;
 begin
   if position('@' in v) = 0 then return v; end if;
   v_local := split_part(v, '@', 1);
-  v_domain := split_part(v, '@', 2);
+  v_domain := substr(v, position('@' in v) + 1);
   if v_domain in ('gmail.com', 'googlemail.com') then
     v_local := replace(split_part(v_local, '+', 1), '.', '');
     v_domain := 'gmail.com';
@@ -99,8 +161,22 @@ begin
   return u;
 end $$;
 
--- Familie des angemeldeten Kontos, sonst no_family
-create or replace function braincraft.my_family()
+-- Geräte-Token aus dem Header x-bc-device (Kinder-Gerät), sonst null
+create or replace function braincraft.device_token()
+returns text language sql stable set search_path = '' as $$
+  select nullif(left(coalesce(nullif(current_setting('request.headers', true), '')::json->>'x-bc-device', ''), 128), '');
+$$;
+
+-- Gerät zum Token im Header (auch widerrufen), sonst null
+create or replace function braincraft.my_device()
+returns braincraft.devices language sql stable security definer set search_path = '' as $$
+  select d.* from braincraft.devices d
+   where braincraft.device_token() ~ '^[0-9a-f]{64}$'
+     and d.token_hash = encode(extensions.digest(braincraft.device_token(), 'sha256'), 'hex');
+$$;
+
+-- Familie des Google-Kontos, sonst no_family (Konto-Funktionen: nie über ein Geräte-Token)
+create or replace function braincraft.my_google_family()
 returns uuid language plpgsql stable security definer set search_path = '' as $$
 declare f uuid;
 begin
@@ -109,7 +185,21 @@ begin
   return f;
 end $$;
 
--- Familie des angemeldeten Kontos MIT gültigem Eltern-Token (PIN), sonst pin_required
+-- Familie dieses Geräts: gekoppeltes Kinder-Gerät (Header x-bc-device) oder Eltern-Gerät mit Google
+create or replace function braincraft.my_family()
+returns uuid language plpgsql stable security definer set search_path = '' as $$
+declare d braincraft.devices;
+begin
+  if braincraft.device_token() is not null then
+    d := braincraft.my_device();
+    if d.id is null then raise exception 'device_unknown'; end if;
+    if d.revoked_at is not null then raise exception 'device_revoked'; end if;
+    return d.family_id;
+  end if;
+  return braincraft.my_google_family();
+end $$;
+
+-- Familie dieses Geräts MIT gültigem Eltern-Token (PIN), sonst pin_required
 create or replace function braincraft.my_parent(p_token text)
 returns uuid language plpgsql stable security definer set search_path = '' as $$
 declare f uuid := braincraft.my_family();
@@ -118,15 +208,57 @@ begin
   return f;
 end $$;
 
+-- Google-Konto MIT Eltern-Token (Eltern verwalten, Geräte koppeln/entfernen)
+create or replace function braincraft.my_google_parent(p_token text)
+returns uuid language plpgsql stable security definer set search_path = '' as $$
+declare f uuid := braincraft.my_google_family();
+begin
+  if not braincraft.is_parent(f, p_token) then raise exception 'pin_required'; end if;
+  return f;
+end $$;
+
+-- IP der Anfrage (erster Eintrag von x-forwarded-for) für die Bremse beim Koppeln
+create or replace function braincraft.request_ip()
+returns text language sql stable set search_path = '' as $$
+  select left(btrim(split_part(coalesce(nullif(current_setting('request.headers', true), '')::json->>'x-forwarded-for', ''), ',', 1)), 64);
+$$;
+
+-- Bremse: true, wenn diese IP oder alle zusammen zu viele Fehlversuche hatten (15 Minuten)
+create or replace function braincraft.pair_blocked()
+returns boolean language sql stable security definer set search_path = '' as $$
+  select (select count(*) from braincraft.pair_attempts
+           where not ok and ip = braincraft.request_ip() and at > now() - interval '15 minutes') >= 5
+      or (select count(*) from braincraft.pair_attempts
+           where not ok and at > now() - interval '15 minutes') >= 50;
+$$;
+
+-- Neues Geräte-Token (32 Byte zufällig) für eine Familie anlegen; höchstens 10 aktive Geräte je Familie
+create or replace function braincraft.device_create(p_family uuid, p_name text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare v_tok text := encode(extensions.gen_random_bytes(32), 'hex'); v_id uuid;
+begin
+  if (select count(*) from braincraft.devices where family_id = p_family and revoked_at is null) >= 10 then
+    raise exception 'limit_reached';
+  end if;
+  insert into braincraft.devices (family_id, name, token_hash, last_seen_at)
+  values (p_family, left(coalesce(nullif(btrim(p_name), ''), 'Kinder-Gerät'), 40),
+          encode(extensions.digest(v_tok, 'sha256'), 'hex'), now())
+  returning id into v_id;
+  return jsonb_build_object('ok', true, 'device_token', v_tok, 'device_id', v_id, 'family_id', p_family);
+end $$;
+
 -- ---------------------------------------------------------------------
 -- Neue öffentliche Funktionen
 -- ---------------------------------------------------------------------
 
--- Bestätigte, vereinheitlichte Adresse des angemeldeten Kontos (leer, wenn nicht bestätigt)
+-- Vereinheitlichte Adresse der GOOGLE-Identität des Kontos, nur wenn Google sie als bestätigt meldet
+-- (andere Anbieter oder unbestätigte Adressen zählen für Einladungen nicht; leer, wenn keine)
 create or replace function braincraft.my_email()
 returns text language sql stable security definer set search_path = '' as $$
-  select coalesce((select braincraft.email_norm(email) from auth.users
-                    where id = braincraft.me() and email_confirmed_at is not null), '');
+  select coalesce((select braincraft.email_norm(i.identity_data->>'email') from auth.identities i
+                    where i.user_id = braincraft.me() and i.provider = 'google'
+                      and i.identity_data->>'email_verified' = 'true'
+                    order by i.created_at limit 1), '');
 $$;
 
 -- Nach jeder Anmeldung: Familie des Kontos (oder null). Nimmt KEINE Einladung an (siehe bc_my_invites).
@@ -203,8 +335,9 @@ begin
      or (select count(*) from braincraft.families where created_at > now() - interval '24 hours') >= 3 then
     raise exception 'limit_reached';
   end if;
-  insert into braincraft.families (code_hash, pin_hash)
-  values (null, extensions.crypt(p_pin, extensions.gen_salt('bf', 8)))
+  -- ohne code_hash (die Spalte entfällt mit 008)
+  insert into braincraft.families (pin_hash)
+  values (extensions.crypt(p_pin, extensions.gen_salt('bf', 8)))
   returning id into f;
   insert into braincraft.profiles (family_id, child_name) values (f, btrim(p_child_name)) returning id into k;
   insert into braincraft.family_parents (family_id, user_id) values (f, u);
@@ -215,7 +348,7 @@ end $$;
 -- Eltern und offene Einladungen der Familie (nur mit Eltern-Token)
 create or replace function public.bc_parents(p_token text)
 returns jsonb language plpgsql stable security definer set search_path = '' as $$
-declare f uuid := braincraft.my_parent(p_token); u uuid := auth.uid();
+declare f uuid := braincraft.my_google_parent(p_token); u uuid := auth.uid();
 begin
   return jsonb_build_object(
     'parents', coalesce((select jsonb_agg(jsonb_build_object(
@@ -232,9 +365,9 @@ end $$;
 -- Weiteres Elternteil per Gmail-Adresse einladen (nur mit Eltern-Token)
 create or replace function public.bc_parent_invite(p_token text, p_email text)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare f uuid := braincraft.my_parent(p_token); v text := braincraft.email_norm(p_email);
+declare f uuid := braincraft.my_google_parent(p_token); v text := braincraft.email_norm(p_email);
 begin
-  if length(v) > 254 or v !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then raise exception 'bad_email'; end if;
+  if length(v) > 254 or v !~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$' then raise exception 'bad_email'; end if;
   if exists (select 1 from braincraft.family_parents fp join auth.users au on au.id = fp.user_id
               where fp.family_id = f and braincraft.email_norm(au.email) = v) then
     raise exception 'already_parent';
@@ -254,7 +387,7 @@ end $$;
 
 create or replace function public.bc_parent_invite_delete(p_token text, p_email text)
 returns boolean language plpgsql security definer set search_path = '' as $$
-declare f uuid := braincraft.my_parent(p_token);
+declare f uuid := braincraft.my_google_parent(p_token);
 begin
   delete from braincraft.parent_invites where family_id = f and email = braincraft.email_norm(p_email);
   return found;
@@ -264,12 +397,146 @@ end $$;
 -- Anderes Elternteil aus der Familie nehmen (nicht sich selbst, nicht das letzte); beendet alle Eltern-Sitzungen
 create or replace function public.bc_parent_remove(p_token text, p_user_id uuid)
 returns boolean language plpgsql security definer set search_path = '' as $$
-declare f uuid := braincraft.my_parent(p_token);
+declare f uuid := braincraft.my_google_parent(p_token);
 begin
   if p_user_id is null or p_user_id = auth.uid() then raise exception 'cannot_remove_self'; end if;
   delete from braincraft.family_parents where family_id = f and user_id = p_user_id;
   if not found then raise exception 'not_found'; end if;
   delete from braincraft.parent_sessions where family_id = f;
+  return true;
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Kinder-Geräte koppeln
+-- ---------------------------------------------------------------------
+
+-- Eltern-Gerät (Google + PIN): Einmal-Code für ein neues Kinder-Gerät, 10 Minuten, einmal einlösbar.
+-- 10 Zeichen aus 31 (ohne 0/O, 1/I/L), als XXXXX-XXXXX; höchstens 3 offene und 20 neue je 24 h je Familie.
+create or replace function public.bc_pair_create(p_token text, p_name text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare f uuid := braincraft.my_google_parent(p_token);
+  v_alpha text := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; v_code text := ''; v_byte int; v_exp timestamptz;
+begin
+  if length(btrim(coalesce(p_name, ''))) > 40 then raise exception 'invalid_input'; end if;
+  perform 1 from braincraft.families where id = f for update;
+  delete from braincraft.pair_codes where family_id = f and (expires_at < now() - interval '1 day');
+  if (select count(*) from braincraft.pair_codes where family_id = f and used_at is null and expires_at > now()) >= 3
+     or (select count(*) from braincraft.pair_codes where family_id = f and created_at > now() - interval '24 hours') >= 20 then
+    raise exception 'limit_reached';
+  end if;
+  -- Nur Bytes unter 248 (= 8 × 31), damit jedes Zeichen gleich wahrscheinlich ist (Siggi N7)
+  while length(v_code) < 10 loop
+    v_byte := get_byte(extensions.gen_random_bytes(1), 0);
+    if v_byte < 248 then v_code := v_code || substr(v_alpha, (v_byte % 31) + 1, 1); end if;
+  end loop;
+  v_exp := now() + interval '10 minutes';
+  insert into braincraft.pair_codes (code_hash, family_id, created_by, name, expires_at)
+  values (encode(extensions.digest(v_code, 'sha256'), 'hex'), f, auth.uid(),
+          left(coalesce(nullif(btrim(p_name), ''), 'Kinder-Gerät'), 40), v_exp);
+  return jsonb_build_object('code', substr(v_code, 1, 5) || '-' || substr(v_code, 6, 5), 'expires_at', v_exp);
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Kinder-Gerät (anon): Einmal-Code einlösen → Geräte-Token. Fehlversuche werden gezählt (kein raise,
+-- sonst ginge der Eintrag mit der Rücknahme verloren); Antwort {ok:false, error:'pair_invalid'|'pair_blocked'}.
+-- (Parameter heißt p_pair_code, nicht p_code: 008 entfernt alle Funktionen mit p_code)
+create or replace function public.bc_pair_redeem(p_pair_code text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare v text := upper(regexp_replace(left(coalesce(p_pair_code, ''), 40), '[^A-Za-z0-9]', '', 'g'));
+  r braincraft.pair_codes; v_dev jsonb;
+begin
+  delete from braincraft.pair_attempts where at < now() - interval '1 day';
+  if braincraft.pair_blocked() then return jsonb_build_object('ok', false, 'error', 'pair_blocked'); end if;
+  select * into r from braincraft.pair_codes
+   where length(v) = 10 and code_hash = encode(extensions.digest(v, 'sha256'), 'hex')
+     and used_at is null and expires_at > now()
+   for update;
+  if r.code_hash is null then
+    insert into braincraft.pair_attempts (ip, ok) values (braincraft.request_ip(), false);
+    return jsonb_build_object('ok', false, 'error', 'pair_invalid');
+  end if;
+  update braincraft.pair_codes set used_at = now() where code_hash = r.code_hash;
+  insert into braincraft.pair_attempts (ip, ok) values (braincraft.request_ip(), true);
+  v_dev := braincraft.device_create(r.family_id, r.name);
+  return v_dev || jsonb_build_object('name', r.name);
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Altgerät (anon, nur bis 008): vorhandenen Familien-Code einmalig gegen ein Geräte-Token tauschen.
+-- Gleiche Bremse wie beim Koppeln; der Code gab schon bisher genau diese Kinderrechte.
+create or replace function public.bc_device_from_code(p_code text, p_name text default null)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare f uuid;
+begin
+  delete from braincraft.pair_attempts where at < now() - interval '1 day';
+  if braincraft.pair_blocked() then return jsonb_build_object('ok', false, 'error', 'pair_blocked'); end if;
+  begin
+    f := braincraft.family(p_code);
+  exception when others then
+    f := null;
+  end;
+  if f is null then
+    insert into braincraft.pair_attempts (ip, ok) values (braincraft.request_ip(), false);
+    return jsonb_build_object('ok', false, 'error', 'pair_invalid');
+  end if;
+  insert into braincraft.pair_attempts (ip, ok) values (braincraft.request_ip(), true);
+  return braincraft.device_create(f, coalesce(nullif(btrim(p_name), ''), 'Altes Gerät'));
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Nach 008 (kein braincraft.family(text) mehr) den Code-Tausch beim erneuten Einspielen gleich wieder entfernen
+do $$
+begin
+  if to_regprocedure('braincraft.family(text)') is null then
+    drop function if exists public.bc_device_from_code(text, text);
+  end if;
+end $$;
+
+-- Kinder-Gerät meldet sich (zuletzt aktiv, höchstens alle 10 Minuten geschrieben); liefert Familie und Name.
+-- Widerrufen/unbekannt: device_revoked/device_unknown.
+create or replace function public.bc_device_hello()
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare f uuid := braincraft.my_family(); d braincraft.devices := braincraft.my_device();
+begin
+  update braincraft.devices set last_seen_at = now()
+   where id = d.id and (last_seen_at is null or last_seen_at < now() - interval '10 minutes');
+  return jsonb_build_object('family_id', f, 'device_id', d.id, 'name', d.name);
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Kinder-Gerät trennt sich selbst (Token sofort ungültig)
+create or replace function public.bc_device_leave()
+returns boolean language plpgsql security definer set search_path = '' as $$
+declare d braincraft.devices := braincraft.my_device();
+begin
+  if d.id is null then return false; end if;
+  update braincraft.devices set revoked_at = coalesce(revoked_at, now()) where id = d.id;
+  return true;
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Eltern-Gerät (Google + PIN): gekoppelte Geräte der Familie (ohne widerrufene älter als 30 Tage)
+create or replace function public.bc_devices(p_token text)
+returns jsonb language plpgsql stable security definer set search_path = '' as $$
+declare f uuid := braincraft.my_google_parent(p_token);
+begin
+  return coalesce((select jsonb_agg(jsonb_build_object(
+      'id', d.id, 'name', d.name, 'created_at', d.created_at, 'last_seen_at', d.last_seen_at,
+      'revoked_at', d.revoked_at) order by d.revoked_at nulls first, d.created_at)
+    from braincraft.devices d
+   where d.family_id = f and (d.revoked_at is null or d.revoked_at > now() - interval '30 days')), '[]'::jsonb);
+exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
+end $$;
+
+-- Eltern-Gerät (Google + PIN): Gerät entfernen, Token sofort ungültig
+create or replace function public.bc_device_revoke(p_token text, p_device_id uuid)
+returns boolean language plpgsql security definer set search_path = '' as $$
+declare f uuid := braincraft.my_google_parent(p_token);
+begin
+  update braincraft.devices set revoked_at = now()
+   where id = p_device_id and family_id = f and revoked_at is null;
+  if not found then raise exception 'not_found'; end if;
   return true;
 exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
 end $$;
@@ -1070,8 +1337,8 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- Rechte (Siggi N5): Tabellen und Helfer für niemanden; Funktionen mit p_code wie bisher
--- (bis 008), Funktionen ohne p_code nur für angemeldete Konten.
+-- Rechte (Siggi N5): Tabellen und Helfer für niemanden; Funktionen mit p_code wie bisher (bis 008),
+-- Konto-Funktionen nur für authenticated, Kinder-/PIN-Funktionen auch für anon (Geräte-Token).
 -- ---------------------------------------------------------------------
 revoke all on all tables    in schema braincraft from public, anon, authenticated;
 revoke all on all sequences in schema braincraft from public, anon, authenticated;
@@ -1082,15 +1349,21 @@ declare r record;
 begin
   for r in select p.oid::regprocedure as sig, p.proname, coalesce('p_code' = any(p.proargnames), false) as legacy
              from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-            where n.nspname = 'public' and p.proname like 'bc\_%' loop
+            where n.nspname = 'public' and left(p.proname, 3) = 'bc_' loop
     execute format('revoke all on function %s from public, anon, authenticated', r.sig);
     if r.proname in ('bc_pin_reset', 'bc_scan_update', 'bc_scan_stale', 'bc_invite_create',
                      'bc_scan_tick', 'bc_scan_orphans', 'bc_cron_secret') then
       execute format('grant execute on function %s to service_role', r.sig);
     elsif r.legacy or r.proname = 'bc_create' then
       execute format('grant execute on function %s to anon, authenticated, service_role', r.sig);
-    else
+    elsif r.proname in ('bc_session', 'bc_my_invites', 'bc_invite_accept', 'bc_invite_decline', 'bc_family_create',
+                        'bc_parents', 'bc_parent_invite', 'bc_parent_invite_delete', 'bc_parent_remove',
+                        'bc_pair_create', 'bc_devices', 'bc_device_revoke') then
+      -- Konto-Funktionen: nur mit Google-Sitzung
       execute format('grant execute on function %s to authenticated, service_role', r.sig);
+    else
+      -- Kinder- und PIN-Funktionen: Kinder-Gerät (anon + Geräte-Token) und Eltern-Gerät
+      execute format('grant execute on function %s to anon, authenticated, service_role', r.sig);
     end if;
   end loop;
 end $$;

@@ -26,6 +26,7 @@ import { Boss } from './views/Boss'
 import { GearView } from './views/Gear'
 import { Learn, type LearnTopic } from './views/Learn'
 import { Parents } from './views/Parents'
+import { ConflictView, Reconnect } from './views/Reconnect'
 import { Setup } from './views/Setup'
 import { Shop } from './views/Shop'
 import { Start, type PlayRequest } from './views/Start'
@@ -71,9 +72,11 @@ export function App() {
   const [learnExam, setLearnExam] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   // Familie und Stand auf dem Gerät: spielbar, auch offline und während die Sitzung noch geladen wird.
-  // Nur wenn das Gerät nachweislich abgemeldet ist, erscheint die Anmeldung (Kinder sehen sie sonst nie).
-  const connected = !!s.family && !!s.pull && s.auth !== 'signed_out'
-  const playDemo = demo && !connected && !s.family
+  const connected = !!s.family && !!s.pull
+  // Zugang verloren (abgelaufen, Gerät entfernt, Familie weg, Altgerät): Kinderansicht „Gleich geht's weiter“,
+  // aber erst nach einer laufenden Runde bzw. einem Boss-Kampf (Bodo C1, Lotte D2). Stand bleibt.
+  const needsReconnect = (!!s.pull || s.legacy) && s.access !== 'ok'
+  const playDemo = demo && !s.family && !s.pull && !s.legacy
   const stars = connected ? (currentProfile(s)?.stars_balance ?? 0) : 0
 
   // iOS: Ton erst nach der ersten Berührung erlaubt
@@ -174,20 +177,6 @@ export function App() {
     if (log.filter((a) => a.kind === 'normal').length >= ROUND_MIN) queueRoundFinish(round.id)
   }
 
-  if (!connected && !(demo && !s.family)) {
-    return (
-      <div className="app">
-        <div className="setup-top">
-          <button type="button" className="gear" aria-haspopup="dialog" aria-label={t.settings} onClick={() => setSettingsOpen(true)}>
-            <Gear />
-          </button>
-        </div>
-        <Setup onDemo={() => { writeDemo(true); setDemo(true) }} />
-        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      </div>
-    )
-  }
-
   if (boss) {
     return (
       <div className="app">
@@ -227,6 +216,48 @@ export function App() {
           onAgain={() => start(round.request, round.key + 1)}
           slideFor={slideFor}
         />
+      </div>
+    )
+  }
+
+  const settingsTop = (
+    <div className="setup-top">
+      <button type="button" className="gear" aria-haspopup="dialog" aria-label={t.settings} onClick={() => setSettingsOpen(true)}>
+        <Gear />
+      </button>
+    </div>
+  )
+
+  if (s.conflict) {
+    return (
+      <div className="app">
+        {settingsTop}
+        <ConflictView />
+        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      </div>
+    )
+  }
+
+  if (needsReconnect && !parentsOpen) {
+    return (
+      <div className="app">
+        {settingsTop}
+        <Reconnect />
+        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      </div>
+    )
+  }
+
+  if (!connected && !playDemo) {
+    return (
+      <div className="app">
+        <div className="setup-top">
+          <button type="button" className="gear" aria-haspopup="dialog" aria-label={t.settings} onClick={() => setSettingsOpen(true)}>
+            <Gear />
+          </button>
+        </div>
+        <Setup onDemo={() => { writeDemo(true); setDemo(true) }} />
+        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </div>
     )
   }

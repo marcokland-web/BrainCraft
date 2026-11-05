@@ -1,12 +1,14 @@
 // Daten-Dieter / Bug-Bodo: Probelauf der Migrationen 001, 003-008 in PGlite (echtes PostgreSQL als WASM, lokal)
 // mit Attrappen für die Supabase-Schemas (auth.users/auth.uid(), extensions.digest/crypt, storage, cron).
-// Prüft 007 (Google-Anmeldung, Bestandsfamilie, Einladungen, Rechte) und 008 (Code entfernen).
+// Prüft 007 (Google-Anmeldung, Bestandsfamilie, Einladungen, Kinder-Geräte koppeln, Rechte) und 008 (Code
+// entfernen), danach 007 erneut (wiederholbar) und Familie anlegen nach 008. email_norm gegen src/lib/email.ts.
 // Die echte Datenbank wird NIE erreicht. crypt() ist hier eine Attrappe (md5), bcrypt prüft das nicht.
 // Aufruf: cd ~/Apps/BrainCraft && node supabase/tests/007_google.probe.mjs   (Exit-Code 0 = bestanden)
 import { PGlite } from '@electric-sql/pglite'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { normEmail } from '../../src/lib/email.ts'
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), '..') + '/'
 const db = new PGlite()
@@ -22,6 +24,7 @@ create function extensions.crypt(p text, s text) returns text language sql immut
 create function extensions.gen_random_bytes(n int) returns bytea language sql as $$
   select substring(decode(md5(random()::text) || md5(random()::text) || md5(random()::text) || md5(random()::text), 'hex') from 1 for n) $$;
 create table auth.users (id uuid primary key, email text, email_confirmed_at timestamptz);
+create table auth.identities (id uuid primary key default gen_random_uuid(), user_id uuid, provider text, identity_data jsonb, created_at timestamptz default now());
 create function auth.uid() returns uuid language sql stable as $$
   select nullif(nullif(current_setting('request.jwt.claims', true), '')::jsonb->>'sub', '')::uuid $$;
 create table storage.buckets (id text primary key, name text, public boolean, file_size_limit int, allowed_mime_types text[]);
@@ -29,6 +32,8 @@ create table storage.objects (id uuid, bucket_id text, name text);
 create function cron.schedule(n text, s text, c text) returns bigint language sql as $$ select 1::bigint $$;
 `)
 
+// Einspielen über das MCP-Werkzeug verfälscht Backslash-Escapes: in 007/008 nur chr(), [[:space:]], [.]
+for (const f of ['007_google.sql', '008_code_entfernen.sql']) ok(`${f}: keine Backslashes`, !readFileSync(DIR + f, 'utf8').includes('\\'))
 const run = async (f) => { await db.exec(readFileSync(DIR + f, 'utf8')) }
 const tx = async (f) => { await db.exec('begin;\n' + readFileSync(DIR + f, 'utf8') + '\ncommit;') }
 await run('001_braincraft.sql')
@@ -41,12 +46,18 @@ const STRANGER = '99999999-9999-4999-8999-999999999999'
 await db.exec(`
 insert into auth.users values ('${MARCO}', 'eltern.test@gmail.com', now()), ('${OTHER}', 'Zweit.Eltern+bc@GoogleMail.com', now()),
   ('${STRANGER}', 'fremd@example.org', now());
+insert into auth.identities (user_id, provider, identity_data) values
+  ('${MARCO}', 'email', '{"email":"eltern.test@gmail.com"}'),
+  ('${OTHER}', 'google', '{"email":"Zweit.Eltern+bc@GoogleMail.com","email_verified":true}'),
+  ('${STRANGER}', 'google', '{"email":"fremd@example.org","email_verified":true}');
 insert into braincraft.invites (code_hash, expires_at) values (encode(extensions.digest('INVITE0000000000', 'sha256'), 'hex'), now() + interval '1 day');
 `)
-const as = async (role, sub, sql, params = []) => {
+// headers: wie PostgREST (request.headers), z. B. { 'x-bc-device': token, 'x-forwarded-for': ip }
+const as = async (role, sub, sql, params = [], headers = {}) => {
   await db.exec('begin')
   try {
     await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify(sub ? { sub, role } : { role })])
+    await db.query(`select set_config('request.headers', $1, true)`, [JSON.stringify(headers)])
     await db.exec(`set local role ${role}`)
     const r = await db.query(sql, params)
     await db.exec('commit')
@@ -77,8 +88,11 @@ ok('Sterne bleiben erhalten', r.rows[0].stars_balance === 5)
 r = await db.query(`select p.oid::regprocedure::text sig, has_function_privilege('anon', p.oid, 'execute') anon,
   has_function_privilege('authenticated', p.oid, 'execute') auth, coalesce('p_code' = any(p.proargnames), false) legacy
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'bc\\_%'`)
+const ACCOUNT = /^bc_(session|my_invites|invite_accept|invite_decline|family_create|parents|parent_invite|parent_invite_delete|parent_remove|pair_create|devices|device_revoke)\(/
 const neu = r.rows.filter((x) => !x.legacy && !/bc_create|bc_invite_create|bc_pin_reset|bc_scan_stale|bc_scan_update/.test(x.sig))
-ok('neue Funktionen: nicht anon, aber authenticated', neu.length >= 33 && neu.every((x) => !x.anon && x.auth), JSON.stringify(neu.filter((x) => x.anon || !x.auth)))
+const konto = neu.filter((x) => ACCOUNT.test(x.sig))
+ok('Konto-Funktionen: nicht anon, aber authenticated', konto.length === 12 && konto.every((x) => !x.anon && x.auth), JSON.stringify(konto.map((x) => [x.sig, x.anon, x.auth])))
+ok('Kinder-/PIN-Funktionen: anon (Geräte-Token) und authenticated', neu.filter((x) => !ACCOUNT.test(x.sig)).length >= 30 && neu.filter((x) => !ACCOUNT.test(x.sig)).every((x) => x.anon && x.auth), JSON.stringify(neu.filter((x) => !ACCOUNT.test(x.sig) && !(x.anon && x.auth)).map((x) => x.sig)))
 ok('alte p_code-Funktionen bleiben für anon (bis 008)', r.rows.filter((x) => x.legacy).every((x) => x.anon))
 r = await db.query(`select has_function_privilege('authenticated', 'braincraft.my_family()', 'execute') a, has_table_privilege('authenticated', 'braincraft.family_parents', 'select') b`)
 ok('Helfer und Tabellen nicht direkt erreichbar', !r.rows[0].a && !r.rows[0].b)
@@ -89,7 +103,7 @@ ok('alte App (p_code) funktioniert nach 007 weiter', r.rows && r.rows[0].x, r.er
 
 // Neue Wege
 r = await as('anon', null, `select public.bc_pull(p_token => null) as x`)
-ok('anon ohne Konto: bc_pull verboten', r.error && /permission denied/.test(r.error), r.error)
+ok('anon ohne Konto und ohne Gerät: not_signed_in', r.error === 'not_signed_in', r.error)
 r = await as('authenticated', null, `select public.bc_pull(p_token => null) as x`)
 ok('ohne sub: not_signed_in', r.error === 'not_signed_in', r.error)
 r = await as('authenticated', STRANGER, `select public.bc_pull(p_token => null) as x`)
@@ -146,7 +160,8 @@ r = await as('authenticated', STRANGER, `select public.bc_my_invites() as x`)
 ok('nach Ablehnen keine Einladung mehr', r.rows && r.rows[0].x.length === 0, r.error)
 
 // Unbestätigte Adresse
-await db.exec(`insert into auth.users values ('77777777-7777-4777-8777-777777777777', 'unbest@gmail.com', null)`)
+await db.exec(`insert into auth.users values ('77777777-7777-4777-8777-777777777777', 'unbest@gmail.com', null);
+  insert into auth.identities (user_id, provider, identity_data) values ('77777777-7777-4777-8777-777777777777', 'google', '{"email":"unbest@gmail.com","email_verified":false}');`)
 await as('authenticated', MARCO, `select public.bc_parent_invite(p_token => $1, p_email => 'unbest@gmail.com')`, [TOK])
 r = await as('authenticated', '77777777-7777-4777-8777-777777777777', `select public.bc_my_invites() as x`)
 ok('unbestätigte Adresse sieht keine Einladung', r.rows && r.rows[0].x.length === 0, r.error)
@@ -186,6 +201,72 @@ ok('entferntes Elternteil: no_family', r.error === 'no_family', r.error)
 r = await as('authenticated', MARCO, `select public.bc_parents(p_token => $1) as x`, [TOK])
 ok('Entfernen beendet Eltern-Sitzungen', r.error === 'pin_required', r.error)
 
+// ---------- Kinder-Geräte koppeln ----------
+r = await as('authenticated', MARCO, `select public.bc_parent_unlock(p_pin => '1234') as x`)
+const TOK2 = r.rows[0].x.token
+r = await as('anon', null, `select public.bc_pair_create(p_token => $1, p_name => 'Lias iPad') as x`, [TOK2])
+ok('Koppeln: anon darf keinen Code erzeugen', r.error && /permission denied/.test(r.error), r.error)
+r = await as('authenticated', MARCO, `select public.bc_pair_create(p_token => null, p_name => 'Lias iPad') as x`)
+ok('Koppeln: ohne PIN-Token pin_required', r.error === 'pin_required', r.error)
+r = await as('authenticated', MARCO, `select public.bc_pair_create(p_token => $1, p_name => 'Lias iPad') as x`, [TOK2])
+const PAIR = r.rows?.[0].x.code
+ok('Koppeln: Code XXXXX-XXXXX ohne verwechselbare Zeichen, 10 Minuten', /^[A-HJKMNP-Z2-9]{5}-[A-HJKMNP-Z2-9]{5}$/.test(PAIR ?? '') && Math.abs(new Date(r.rows[0].x.expires_at) - Date.now() - 600000) < 5000, r.error ?? JSON.stringify(r.rows))
+r = await db.query(`select count(*)::int n from braincraft.pair_codes where code_hash = encode(extensions.digest($1, 'sha256'), 'hex')`, [PAIR.replace('-', '')])
+ok('Koppeln: Code nur als Hash gespeichert', r.rows[0].n === 1)
+const IP1 = { 'x-forwarded-for': '203.0.113.7, 10.0.0.1' }
+for (let i = 0; i < 5; i++) await as('anon', null, `select public.bc_pair_redeem(p_pair_code => 'AAAAA-AAAAA') as x`, [], IP1)
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => $1) as x`, [PAIR], IP1)
+ok('Bremse: nach 5 Fehlversuchen je IP gesperrt (auch der richtige Code)', r.rows && r.rows[0].x.ok === false && r.rows[0].x.error === 'pair_blocked', r.error ?? JSON.stringify(r.rows))
+r = await db.query(`select count(*)::int n from braincraft.pair_attempts where not ok`)
+ok('Bremse: Fehlversuche bleiben gezählt (kein Rücknahme-Verlust)', r.rows[0].n === 5)
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => $1) as x`, [PAIR.toLowerCase().replace('-', ' ')], { 'x-forwarded-for': '198.51.100.2' })
+const DEV = r.rows?.[0].x.device_token
+ok('Einlösen (andere IP, klein geschrieben, mit Leerzeichen): Geräte-Token 32 Byte', r.rows && r.rows[0].x.ok && /^[0-9a-f]{64}$/.test(DEV ?? '') && r.rows[0].x.family_id === FAM, r.error ?? JSON.stringify(r.rows))
+r = await db.query(`select count(*)::int n from braincraft.devices where token_hash = encode(extensions.digest($1, 'sha256'), 'hex') and name = 'Lias iPad'`, [DEV])
+ok('Gerät gespeichert, Token nur als Hash, Name übernommen', r.rows[0].n === 1)
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => $1) as x`, [PAIR], { 'x-forwarded-for': '198.51.100.3' })
+ok('Code nur einmal einlösbar', r.rows && r.rows[0].x.error === 'pair_invalid', JSON.stringify(r.rows))
+const D = { 'x-bc-device': DEV }
+r = await as('anon', null, `select public.bc_pull(p_token => null) as x`, [], D)
+ok('Kinder-Gerät: bc_pull über Geräte-Token', r.rows && r.rows[0].x.family_id === FAM && r.rows[0].x.parent === false, r.error)
+r = await as('anon', null, `select public.bc_device_hello() as x`, [], D)
+ok('Kinder-Gerät: bc_device_hello mit Familie und Name', r.rows && r.rows[0].x.family_id === FAM && r.rows[0].x.name === 'Lias iPad', r.error)
+r = await as('anon', null, `select public.bc_parent_unlock(p_pin => '1234') as x`, [], D)
+const DTOK = r.rows?.[0].x.token
+ok('Kinder-Gerät: Eltern-PIN entsperrt (Familie des Geräts)', !!DTOK, r.error)
+r = await as('anon', null, `select public.bc_question_set_status(p_token => $1, p_ids => '{}'::uuid[], p_status => 'freigegeben') as x`, [DTOK], D)
+ok('Kinder-Gerät: Eltern-Aktion mit PIN-Token', r.rows !== undefined, r.error)
+r = await as('anon', null, `select public.bc_parents(p_token => $1) as x`, [DTOK], D)
+ok('Kinder-Gerät: Eltern verwalten verboten (nur Google)', r.error && /permission denied/.test(r.error), r.error)
+r = await as('anon', null, `select public.bc_pull(p_token => null) as x`, [], { 'x-bc-device': 'f'.repeat(64) })
+ok('unbekanntes Geräte-Token: device_unknown', r.error === 'device_unknown', r.error)
+r = await as('authenticated', MARCO, `select public.bc_devices(p_token => $1) as x`, [TOK2])
+const DEVID = r.rows?.[0].x.find((d) => d.name === 'Lias iPad')?.id
+ok('Cockpit: Geräteliste mit Name und zuletzt aktiv', !!DEVID && r.rows[0].x[0].last_seen_at, r.error ?? JSON.stringify(r.rows))
+r = await as('authenticated', STRANGER, `select public.bc_device_revoke(p_token => $1, p_device_id => $2) as x`, [TOK2, DEVID])
+ok('fremdes Konto kann Gerät nicht entfernen', !!r.error, r.error)
+r = await as('authenticated', MARCO, `select public.bc_device_revoke(p_token => $1, p_device_id => $2) as x`, [TOK2, DEVID])
+ok('Gerät entfernen', r.rows && r.rows[0].x === true, r.error)
+r = await as('anon', null, `select public.bc_pull(p_token => null) as x`, [], D)
+ok('entferntes Gerät: device_revoked (sofort)', r.error === 'device_revoked', r.error)
+r = await as('anon', null, `select public.bc_parent_unlock(p_pin => '1234') as x`, [], D)
+ok('entferntes Gerät: auch PIN geht nicht mehr', r.error === 'device_revoked', r.error)
+// Altgerät: Familien-Code einmalig gegen Geräte-Token
+r = await as('anon', null, `select public.bc_device_from_code(p_code => 'FALSCHERCODEXXXXXXXX') as x`, [], { 'x-forwarded-for': '192.0.2.9' })
+ok('Altgerät: falscher Code -> pair_invalid (gezählt)', r.rows && r.rows[0].x.error === 'pair_invalid', r.error ?? JSON.stringify(r.rows))
+r = await as('anon', null, `select public.bc_device_from_code(p_code => $1) as x`, [CODE], { 'x-forwarded-for': '192.0.2.9' })
+const OLD = r.rows?.[0].x.device_token
+ok('Altgerät: Familien-Code -> Geräte-Token derselben Familie', /^[0-9a-f]{64}$/.test(OLD ?? '') && r.rows[0].x.family_id === FAM, r.error ?? JSON.stringify(r.rows))
+r = await as('anon', null, `select public.bc_pull(p_token => null) ->> 'family_id' as x`, [], { 'x-bc-device': OLD })
+ok('Altgerät mit Geräte-Token: Stand derselben Familie', r.rows && r.rows[0].x === FAM, r.error)
+// email_norm in SQL und JS gleich
+const SAMPLES = ['  Zweit.Eltern+x@GoogleMail.com ', 'a' + String.fromCodePoint(0x200B) + 'b@gmail.com', 'x' + String.fromCodePoint(0x1680) + 'y' + String.fromCodePoint(0x2007) + '@Example.ORG',
+  'Ü.Ber@Example.de', 'a' + String.fromCodePoint(0x85) + String.fromCodePoint(0x3000) + 'b@x.de', String.fromCodePoint(0xFEFF) + 'MIXED.Case+tag@gmail.com', 'ohne-at', 'two@@x.de', 'tab\tz@x.de']
+const sqlNorm = []
+for (const e of SAMPLES) sqlNorm.push((await db.query(`select braincraft.email_norm($1) as v`, [e])).rows[0].v)
+const jsNorm = SAMPLES.map(normEmail)
+ok('email_norm: SQL und JS liefern dasselbe (auch unsichtbare Zeichen, Nicht-ASCII)', JSON.stringify(sqlNorm) === JSON.stringify(jsNorm), JSON.stringify({ sqlNorm, jsNorm }))
+
 // Grenzen: 3 neue Familien je 24 h
 for (const id of ['a1', 'a2', 'a3']) {
   const u = `${id}aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`
@@ -208,6 +289,18 @@ r = await as('authenticated', MARCO, `select public.bc_pull(null) ->> 'family_id
 ok('008: Aufruf ohne Namen nicht mehr mehrdeutig', r.rows && r.rows[0].x === FAM, r.error)
 await tx('008_code_entfernen.sql')
 ok('008 ist wiederholbar', true)
+await db.exec(`insert into auth.users values ('b1bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'neu@example.org', now())`)
+await db.exec(`delete from braincraft.families where created_at > now() - interval '1 hour' and id <> '${FAM}'`)
+r = await as('authenticated', 'b1bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', `select public.bc_family_create(p_child_name => 'Mo', p_pin => '1234') as x`)
+ok('nach 008: Familie anlegen (ohne code_hash) klappt', r.rows && r.rows[0].x.family_id, r.error)
+r = await db.query(`select count(*)::int n from pg_proc where proname = 'bc_device_from_code'`)
+ok('nach 008: Code-Tausch für Altgeräte entfernt', r.rows[0].n === 0)
+r = await db.query(`select count(*)::int n from pg_proc where proname = 'bc_pair_redeem'`)
+ok('nach 008: Koppeln (bc_pair_redeem) bleibt', r.rows[0].n === 1)
+await tx('007_google.sql')
+ok('007 auch nach 008 wiederholbar', true)
+r = await db.query(`select count(*)::int n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'bc\\_%' and 'p_code' = any(p.proargnames)`)
+ok('007 nach 008: legt keine p_code-Funktion wieder an', r.rows[0].n === 0, String(r.rows[0].n))
 
 const failed = results.filter((x) => !x).length
 console.log(`\n${results.length - failed}/${results.length} bestanden`)

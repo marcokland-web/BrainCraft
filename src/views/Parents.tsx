@@ -7,6 +7,7 @@ import { usePrefs } from '../lib/prefs'
 import type { Question } from '../lib/types'
 import {
   forgetDevice,
+  leaveDevice,
   parentActive,
   parentLock,
   parentUnlock,
@@ -15,6 +16,7 @@ import {
   useStore,
   type QuestionRow,
 } from '../lib/store'
+import { Devices } from './Devices'
 import { Family } from './Family'
 import { Manage } from './Manage'
 import { ShopManager } from './ShopManager'
@@ -188,15 +190,23 @@ export function Parents({ onClose }: { onClose: () => void }) {
     else dialog.current?.close()
   }, [askSignOut])
 
-  async function signOut(wipeData: boolean) {
+  // Abmelden (Eltern-Gerät) bzw. Trennen (Kinder-Gerät). Knopf zeigt „beschäftigt“; höchstens 3 s Netz,
+  // offline sofort lokal (Bodo C6). Erst danach Eltern-Freischaltung beenden.
+  async function signOut(wipeData: boolean, scope: 'local' | 'global' = 'local') {
     setBusy(true)
     resetTogether()
-    parentLock()
-    await signOutDevice()
-    forgetDevice(wipeData)
-    setBusy(false)
-    setAskSignOut(false)
-    onClose()
+    try {
+      if (s.device) await leaveDevice(wipeData)
+      else {
+        await signOutDevice(scope)
+        forgetDevice(wipeData)
+      }
+    } finally {
+      parentLock()
+      setBusy(false)
+      setAskSignOut(false)
+      onClose()
+    }
   }
 
   if (!unlocked) {
@@ -293,14 +303,26 @@ export function Parents({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      <Family />
+      {/* Eltern und Kinder-Geräte verwalten nur auf einem Eltern-Gerät mit Google (nie auf dem Kinder-Gerät) */}
+      {!s.device && auth.user ? (
+        <>
+          <Family />
+          <Devices />
+        </>
+      ) : (
+        <p className="muted bc-small parents-note">{t.devicesGoogleOnly}</p>
+      )}
 
       <div>
         <p className="kicker">{t.deviceTitle}</p>
         <div className="list">
-          {auth.user && <AccountRow user={auth.user} />}
+          {s.device ? (
+            <div className="row acc-row"><span className="tx"><b>{t.deviceKid}</b></span></div>
+          ) : (
+            auth.user && <AccountRow user={auth.user} />
+          )}
           <button type="button" className="row danger-row" onClick={() => setAskSignOut(true)}>
-            <span className="tx"><b>{t.signOut}</b></span>
+            <span className="tx"><b>{s.device ? t.deviceLeave : t.signOut}</b></span>
           </button>
         </div>
       </div>
@@ -308,15 +330,17 @@ export function Parents({ onClose }: { onClose: () => void }) {
       </>
       )}
 
-      <dialog ref={dialog} className="settings confirm" aria-label={t.signOut} onClose={() => setAskSignOut(false)}>
+      <dialog ref={dialog} className="settings confirm" aria-label={s.device ? t.deviceLeave : t.signOut} aria-busy={busy || undefined}
+        onCancel={(e) => { if (busy) e.preventDefault() }} onClose={() => setAskSignOut(false)}>
         <div className="st">
-          <p>{t.signOutAsk}</p>
+          <p>{s.device ? t.deviceLeaveAsk : t.signOutAsk}</p>
           {s.queue.some((q) => q.kind !== 'seen') && (
             <p className="setup-err">{t.signOutPending(s.queue.filter((q) => q.kind !== 'seen').length)}</p>
           )}
           <div className="setup-acts">
-            <button type="button" className="btn danger wide" disabled={busy} onClick={() => void signOut(true)}>{t.signOutWipe}</button>
-            <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false)}>{t.signOutKeep}</button>
+            <button type="button" className="btn danger wide" disabled={busy} onClick={() => void signOut(true)}>{s.device ? t.deviceLeaveWipe : t.signOutWipe}</button>
+            <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false)}>{s.device ? t.deviceLeaveKeep : t.signOutKeep}</button>
+            {!s.device && <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false, 'global')}>{t.signOutEverywhere}</button>}
             <button type="button" className="btn plain wide" disabled={busy} onClick={() => setAskSignOut(false)}>{t.cancel}</button>
           </div>
         </div>

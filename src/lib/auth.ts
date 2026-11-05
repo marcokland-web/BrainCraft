@@ -4,8 +4,8 @@ import { PUBLISHABLE_KEY, SUPABASE_URL, setTokenSource } from './api'
 
 // Anmeldung der Eltern mit Google (Supabase Auth, PKCE mit Weiterleitung, auch in der installierten App).
 // Die Sitzung bleibt auf dem Gerät (localStorage „braincraft-auth“, eigener Schlüssel, weil sich alle
-// Studio-Apps auf marcokland-web.github.io einen Origin teilen). Das Kind meldet sich nie selbst an:
-// Ein Elternteil meldet das Gerät einmal an; Eltern-Rechte gibt es trotzdem nur mit der Eltern-PIN.
+// Studio-Apps auf marcokland-web.github.io einen Origin teilen). Nur für Eltern-Geräte (Handy, Mac):
+// Kinder-Geräte werden vom Eltern-Gerät gekoppelt und haben nie eine Google-Sitzung (Marco, 04.11.2026).
 
 export interface AuthUser {
   id: string
@@ -17,9 +17,10 @@ export interface AuthUser {
 export interface AuthState {
   ready: boolean
   user: AuthUser | null
-  // Fehler aus der Weiterleitung als eigener Code für die Texte; no_access = Konto nicht zugelassen
-  // (signup_disabled oder 403 eines Before-User-Created-Hooks)
-  error: 'cancelled' | 'failed' | 'no_access' | null
+  // Fehler aus der Weiterleitung bzw. dem Code-Tausch als eigener Code für die Texte:
+  // no_access = Konto nicht zugelassen (signup_disabled oder Ablehnung durch den Before-User-Created-Hook),
+  // expired = Anmeldung abgelaufen (flow_state_expired, bad_code_verifier), offline = Netz weg beim Tausch
+  error: 'cancelled' | 'failed' | 'no_access' | 'expired' | 'offline' | null
   // Weiterleitung zu Google läuft („Google wird geöffnet …“)
   redirecting: boolean
 }
@@ -29,7 +30,9 @@ const STORAGE_KEY = 'braincraft-auth'
 let client: GoTrueClient | null = null
 let state: AuthState = { ready: false, user: null, error: null, redirecting: false }
 const listeners = new Set<() => void>()
-const changed: ((user: AuthUser | null) => void)[] = []
+const changed: ((user: AuthUser | null, explicit?: boolean) => void)[] = []
+// Während signOutDevice() keine Ereignisse als „unfreiwillig abgemeldet“ melden
+let signingOut = false
 
 function set(patch: Partial<AuthState>) {
   state = { ...state, ...patch }
@@ -79,9 +82,12 @@ function toUser(u: RawUser | null | undefined): AuthUser | null {
 }
 
 // Fehler der Rückleitung bzw. des Code-Tauschs einordnen
-function classify(p: { error?: string | null; code?: string | null; description?: string | null; status?: number }) {
-  const text = `${p.code ?? ''} ${p.description ?? ''}`
-  if (p.code === 'signup_disabled' || p.status === 403 || /signup|sign[- ]?ups? not allowed|hook|not allowed/i.test(text)) return 'no_access' as const
+// Der Hook antwortet live mit 403 {"error_code":"unknown","msg":"Kein Zugang – bitte von der Familie
+// freischalten lassen."}; bei der Rückleitung steht diese Meldung in error_description. 403 allein heißt
+// NICHT „kein Zugang“ (z. B. flow_state_expired kommt auch mit 403; Bodo C3).
+function classify(p: { error?: string | null; code?: string | null; description?: string | null }) {
+  if (p.code === 'signup_disabled' || /Kein Zugang|Signups not allowed/i.test(p.description ?? '')) return 'no_access' as const
+  if (p.code === 'flow_state_expired' || p.code === 'bad_code_verifier') return 'expired' as const
   if (p.error === 'access_denied') return 'cancelled' as const
   return 'failed' as const
 }
@@ -121,7 +127,7 @@ function makeClient() {
     if (user?.id === state.user?.id && state.ready) return
     set({ user })
     // Nicht im Rückruf selbst weiterarbeiten (auth-js hält dort eine Sperre; RPCs würden warten)
-    if (state.ready) window.setTimeout(() => changed.forEach((f) => f(user)), 0)
+    if (state.ready && !signingOut) window.setTimeout(() => changed.forEach((f) => f(user)), 0)
   })
   return client
 }
@@ -143,27 +149,38 @@ export function initAuth(onChange: (user: AuthUser | null) => void) {
       return null
     }
   })
-  void client!
-    .getSession()
-    .then(({ data, error }) => {
-      // Netzfehler beim Erneuern: Sitzung ist nicht verloren, nur gerade nicht prüfbar
-      const user = toUser(data.session?.user) ?? (error && isAuthRetryableFetchError(error) ? storedUser() : null)
-      const failed = !!error && !user
-      const e = error as { code?: string; status?: number; message?: string } | null
-      set({
-        ready: true,
-        user,
-        error: urlError ?? (failed ? classify({ code: e?.code, status: e?.status, description: e?.message }) : null),
-      })
-      cleanUrl()
-      changed.forEach((f) => f(user))
-    })
-    .catch(() => {
-      const user = storedUser()
-      set({ ready: true, user, error: user ? null : 'failed' })
-      cleanUrl()
-      changed.forEach((f) => f(user))
-    })
+  // Mit ?code= zurück von Google: Ergebnis des Tauschs auswerten, sonst stünde man still am Anfang (Bodo C3)
+  const hadCode = params.has('code')
+  void (async () => {
+    let initError: { code?: string; message?: string } | null = null
+    let retryable = false
+    try {
+      const r = await client!.initialize()
+      initError = (r.error as { code?: string; message?: string } | null) ?? null
+      // Nur echter Netzfehler (ohne HTTP-Status) heißt „offline“; 5xx ist „hat nicht geklappt“
+      retryable = !!r.error && isAuthRetryableFetchError(r.error) && !(r.error as { status?: number }).status
+    } catch {
+      retryable = true
+    }
+    let user: AuthUser | null = null
+    let sessionError: unknown = null
+    try {
+      const { data, error } = await client!.getSession()
+      user = toUser(data.session?.user)
+      sessionError = error
+    } catch (e) {
+      sessionError = e
+    }
+    // Netzfehler beim Erneuern: Sitzung ist nicht verloren, nur gerade nicht prüfbar
+    if (!user && sessionError && isAuthRetryableFetchError(sessionError)) user = storedUser()
+    let error: AuthState['error'] = urlError
+    if (!error && !user && hadCode) {
+      error = retryable ? 'offline' : initError ? classify({ code: initError.code, description: initError.message }) : 'failed'
+    }
+    set({ ready: true, user, error })
+    cleanUrl()
+    changed.forEach((f) => f(user))
+  })()
 }
 
 // Weiterleitung zu Google; zurück kommt die App mit ?code=…, das initAuth beim Start einlöst
@@ -192,21 +209,26 @@ function clearStoredSession() {
   }
 }
 
-// Nur dieses Gerät abmelden (andere Geräte der Familie bleiben angemeldet). Ergebnis prüfen: Scheitert
-// signOut (z. B. offline), die Sitzung selbst entfernen und einen frischen Client ohne Sitzung anlegen.
-export async function signOutDevice(): Promise<void> {
+// Abmelden: scope 'local' = nur dieses Gerät, 'global' = auf allen Geräten dieses Kontos.
+// Ergebnis prüfen: Scheitert signOut oder dauert es länger als 3 s (offline), die Sitzung selbst entfernen
+// und einen frischen Client ohne Sitzung anlegen (Bodo C6). Meldet das Abmelden als bewusst (explicit).
+export async function signOutDevice(scope: 'local' | 'global' = 'local'): Promise<void> {
   if (!client) return
+  signingOut = true
   let ok = false
   try {
-    const { error } = await client.signOut({ scope: 'local' })
-    ok = !error
-  } catch {
-    ok = false
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+      const r = await Promise.race([
+        client.signOut({ scope }).then((x) => !x.error).catch(() => false),
+        new Promise<boolean>((res) => setTimeout(() => res(false), 3000)),
+      ])
+      ok = r
+    }
+  } finally {
+    clearStoredSession()
+    if (!ok) makeClient()
+    signingOut = false
   }
-  clearStoredSession()
-  if (!ok) makeClient()
-  if (state.user) {
-    set({ user: null })
-    changed.forEach((f) => f(null))
-  }
+  set({ user: null })
+  changed.forEach((f) => f(null, true))
 }

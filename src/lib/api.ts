@@ -11,6 +11,13 @@ export function setTokenSource(fn: () => Promise<string | null>) {
   tokenSource = fn
 }
 
+// Geräte-Token eines gekoppelten Kinder-Geräts (store.ts setzt die Quelle). Ist eins da, geht es im Header
+// x-bc-device mit und die Google-Sitzung NICHT (Kinder-Gerät spricht nur mit Kinder-/PIN-Rechten).
+let deviceSource: () => string | null = () => null
+export function setDeviceSource(fn: () => string | null) {
+  deviceSource = fn
+}
+
 export class ApiError extends Error {
   // code: eigener Fehlercode der bc_*-Funktion (z. B. pin_required) oder 'offline'
   // (ausgeschrieben statt Parameter-Eigenschaft, damit Node die Datei für die Unit-Tests direkt lädt)
@@ -23,9 +30,13 @@ export class ApiError extends Error {
 
 export async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
   let res: Response
-  const access = await tokenSource()
   const headers: Record<string, string> = { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' }
-  if (access) headers.Authorization = `Bearer ${access}`
+  const device = deviceSource()
+  if (device) headers['x-bc-device'] = device
+  else {
+    const access = await tokenSource()
+    if (access) headers.Authorization = `Bearer ${access}`
+  }
   try {
     res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
       method: 'POST',

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { ApiError, rpc } from './api'
+import { ApiError, rpc, setDeviceSource } from './api'
 import { normEmail } from './email'
 import { setPref } from './prefs'
 import { STARS_DAILY_RULE } from './session'
@@ -100,15 +100,29 @@ export interface MyInvite {
   expires_at: string
 }
 
-// Anmeldung des Geräts: unknown = noch nicht geprüft (Start), signed_in / signed_out laut Google-Sitzung
+// Google-Sitzung (nur Eltern-Geräte): unknown = noch nicht geprüft, signed_in, signed_out = nie angemeldet
+// oder bewusst abgemeldet (signOutDevice). Ein unfreiwilliges Abmelden setzt access = 'expired'.
 export type AuthStatus = 'unknown' | 'signed_in' | 'signed_out'
+// Zugang dieses Geräts zur gespeicherten Familie. Alles außer 'ok' heißt: weiterspielen (Runde zu Ende),
+// Stand und Warteschlange bleiben, danach kindgerechter Hinweis für die Eltern (Gerät neu verbinden).
+export type Access = 'ok' | 'expired' | 'revoked' | 'no_family' | 'legacy'
+// Neue Familie passt nicht zum gespeicherten Stand: nichts senden, Eltern entscheiden (roter Knopf)
+export interface Conflict {
+  family: string
+  source: 'google' | 'device'
+  deviceToken?: string
+}
 
 interface State {
   family: string | null
+  // Geräte-Token eines gekoppelten Kinder-Geräts (nur auf diesem Gerät, nie im Klartext auf dem Server)
+  device: string | null
   auth: AuthStatus
+  access: Access
+  conflict: Conflict | null
   // Angemeldet, aber noch keine Familie: Eltern legen eine an (oder wurden mit anderer Adresse eingeladen)
   needsFamily: boolean
-  // Gerät war mit dem früheren Familien-Code verbunden: einmal mit Google anmelden, Stand bleibt
+  // Gerät war mit dem früheren Familien-Code verbunden (Tausch gegen ein Geräte-Token läuft oder steht aus)
   legacy: boolean
   // Offene Einladungen an das angemeldete Konto (nur ohne Familie, nur im Speicher); Annehmen nur sichtbar
   invites: MyInvite[]
@@ -120,7 +134,10 @@ interface State {
   parent: { token: string; until: number } | null
 }
 
-const K = { family: 'braincraft:family', legacyCode: 'braincraft:code', profile: 'braincraft:profile', pull: 'braincraft:pull', queue: 'braincraft:queue', bossLocked: 'braincraft:bosslocked' }
+const K = {
+  family: 'braincraft:family', device: 'braincraft:device', access: 'braincraft:access', legacyCode: 'braincraft:code',
+  profile: 'braincraft:profile', pull: 'braincraft:pull', queue: 'braincraft:queue', bossLocked: 'braincraft:bosslocked',
+}
 
 function read<T>(key: string, fallback: T): T {
   try {
@@ -151,17 +168,21 @@ function childView(pull: Pull): Pull {
   }
 }
 
-// Früherer Familien-Code: nicht mehr nötig (und nicht mehr gültig, sobald 008 eingespielt ist), daher löschen.
-// Stand, Kind und wartende Antworten bleiben, bis die Eltern das Gerät mit Google anmelden.
-const legacy = read<string | null>(K.legacyCode, null) !== null
-if (legacy) write(K.legacyCode, null)
+// Früherer Familien-Code: wird beim Start einmalig gegen ein Geräte-Token getauscht (bc_device_from_code,
+// solange 008 nicht eingespielt ist). Bis dahin bleiben Stand, Kind und wartende Antworten unverändert.
+const legacyCode = read<string | null>(K.legacyCode, null)
+const storedFamily = read<string | null>(K.family, null)
+const storedAccess = read<Access | null>(K.access, null)
 
 let state: State = {
-  family: read<string | null>(K.family, null),
+  family: storedFamily,
+  device: read<string | null>(K.device, null),
   auth: 'unknown',
+  access: legacyCode ? 'legacy' : (storedAccess ?? 'ok'),
+  conflict: null,
   needsFamily: false,
   invites: [],
-  legacy: legacy || (read<string | null>(K.family, null) === null && read<Pull | null>(K.pull, null) !== null),
+  legacy: !!legacyCode,
   profileId: read<string | null>(K.profile, null),
   pull: read<Pull | null>(K.pull, null),
   queue: read<Queued[]>(K.queue, []),
@@ -174,11 +195,16 @@ const listeners = new Set<() => void>()
 function set(patch: Partial<State>) {
   state = { ...state, ...patch }
   if ('family' in patch) write(K.family, state.family)
+  if ('device' in patch) write(K.device, state.device)
+  if ('access' in patch) write(K.access, state.access === 'ok' || state.access === 'legacy' ? null : state.access)
   if ('profileId' in patch) write(K.profile, state.profileId)
   if ('pull' in patch) write(K.pull, state.pull && childView(state.pull))
   if ('queue' in patch) write(K.queue, state.queue)
   listeners.forEach((l) => l())
 }
+
+// Kinder-Gerät schickt sein Token im Header x-bc-device (statt der Google-Sitzung)
+setDeviceSource(() => state.device)
 
 export function useStore(): State {
   return useSyncExternalStore(
@@ -190,36 +216,101 @@ export function useStore(): State {
   )
 }
 
+export function getState(): State {
+  return state
+}
+
 const token = () => (state.parent && state.parent.until > Date.now() ? state.parent.token : null)
 
-// ---------- Anmelden und Einrichten ----------
+// Darf dieses Gerät gerade mit dem Server sprechen? (sonst nur lokal weiterspielen)
+const online = () => !!state.family && state.access === 'ok' && !state.conflict && (!!state.device || state.auth === 'signed_in')
+
+// Fehler, die den Zugang betreffen: nie Daten löschen, nur den Zugang vermerken (Bodo C1/C2)
+function accessFromError(e: unknown): Access | null {
+  if (!(e instanceof ApiError)) return null
+  if (e.code === 'device_revoked' || e.code === 'device_unknown') return 'revoked'
+  if (e.code === 'no_family') return 'no_family'
+  if (e.code === 'not_signed_in' && !state.device) return 'expired'
+  return null
+}
+
+// ---------- Anmelden, Koppeln und Einrichten ----------
 
 function applyPull(pull: Pull) {
   const profileId = pull.profiles.some((p) => p.id === state.profileId) ? state.profileId : (pull.profiles[0]?.id ?? null)
-  // Antworten für Kinder, die es in dieser Familie nicht gibt (z. B. altes Gerät), nie senden
-  const ids = new Set(pull.profiles.map((p) => p.id))
-  const queue = state.queue.filter((q) => ids.has(q.profileId))
-  set({ pull, profileId, offline: false, legacy: false, ...(queue.length !== state.queue.length ? { queue } : {}) })
+  set({ pull, profileId, offline: false, legacy: false })
   const kid = pull.profiles.find((p) => p.id === profileId)
   if (kid) setPref('name', kid.child_name)
 }
 
-// Alles Familiäre von diesem Gerät entfernen (nicht die Einstellungen)
+// Alles Familiäre von diesem Gerät entfernen (nicht die Einstellungen). Nur nach Rückfrage aufrufen.
 function wipe() {
-  set({ family: null, profileId: null, pull: null, queue: [], parent: null, legacy: false })
+  set({ family: null, device: null, access: 'ok', conflict: null, profileId: null, pull: null, queue: [], parent: null, legacy: false })
+  write(K.legacyCode, null)
   setPref('name', '')
 }
 
-// Familie des angemeldeten Kontos übernehmen; anderes Konto als vorher: alten Stand verwerfen
-function adopt(familyId: string) {
-  if (state.family && state.family !== familyId) wipe()
-  set({ family: familyId, needsFamily: false, invites: [] })
+// Liegt auf dem Gerät Stand, der zu einer ANDEREN Familie gehören könnte? (Altgerät ohne family_id: Kinder vergleichen)
+function belongsElsewhere(familyId: string, pull?: Pull | null) {
+  if (state.family) return state.family !== familyId
+  if (!state.pull && !state.queue.length) return false
+  if (!pull) return false
+  const ids = new Set(pull.profiles.map((p) => p.id))
+  const mine = [...(state.pull?.profiles.map((p) => p.id) ?? []), ...state.queue.map((q) => q.profileId)]
+  return mine.length > 0 && !mine.some((id) => ids.has(id))
 }
 
-// Von auth.ts nach dem Start und bei jeder An- oder Abmeldung aufgerufen
-export function authChanged(user: { id: string; email: string } | null) {
+// Familie übernehmen. Passt sie nicht zum gespeicherten Stand: Rückfrage an die Eltern (resolveConflict)
+async function adopt(familyId: string, source: 'google' | 'device', deviceToken?: string) {
+  if (state.family && state.family !== familyId) {
+    set({ conflict: { family: familyId, source, deviceToken }, needsFamily: false, invites: [] })
+    return
+  }
+  // Altgerät/abgemeldeter Stand ohne Familien-ID: erst den neuen Stand holen und die Kinder vergleichen
+  if (!state.family && (state.pull || state.queue.length)) {
+    const prev = state.device
+    if (deviceToken) set({ device: deviceToken })
+    let pull: Pull | null = null
+    try {
+      pull = await rpc<Pull>('bc_pull', { p_token: null })
+    } catch {
+      pull = null
+    }
+    if (belongsElsewhere(familyId, pull)) {
+      set({ device: prev, conflict: { family: familyId, source, deviceToken }, needsFamily: false, invites: [] })
+      return
+    }
+  }
+  set({ family: familyId, access: 'ok', conflict: null, legacy: false, needsFamily: false, invites: [],
+        ...(deviceToken ? { device: deviceToken } : {}) })
+  write(K.legacyCode, null)
+  await refresh()
+}
+
+// Eltern entscheiden über fremden Stand: true = Stand dieses Geräts löschen und neue Familie nehmen,
+// false = neue Verbindung verwerfen, alter Stand bleibt
+export async function resolveConflict(takeNew: boolean) {
+  const c = state.conflict
+  if (!c) return
+  if (!takeNew) {
+    // Neue Verbindung verwerfen; ohne gültigen Zugang zeigt das Gerät danach „neu verbinden“
+    set({ conflict: null, ...(c.source === 'google' || !state.device ? { access: state.pull ? ('expired' as Access) : 'ok' } : {}) })
+    return
+  }
+  wipe()
+  set({ family: c.family, access: 'ok', ...(c.deviceToken ? { device: c.deviceToken } : {}) })
+  await refresh()
+}
+
+// Von auth.ts nach dem Start und bei jeder An- oder Abmeldung aufgerufen. explicit = signOutDevice()
+export function authChanged(user: { id: string; email: string } | null, explicit = false) {
+  if (state.device) return   // Kinder-Gerät: Google spielt keine Rolle
   if (!user) {
-    set({ auth: 'signed_out', needsFamily: false, invites: [], parent: null })
+    // Unfreiwillig (abgelaufen, widerrufen): Kind spielt weiter, Eltern-Hinweis; nie Daten löschen (Bodo C1)
+    // Auch beim Start ohne Sitzung (Familie gespeichert, kein Geräte-Token): ohne Zugang, Eltern-Hinweis
+    const lost = !explicit && (state.auth === 'signed_in' || state.auth === 'unknown') && !!state.family
+    set({ auth: 'signed_out', needsFamily: false, invites: [], parent: null,
+          ...(state.family && (lost || explicit) ? { access: 'expired' as Access } : {}) })
     return
   }
   set({ auth: 'signed_in' })
@@ -228,7 +319,7 @@ export function authChanged(user: { id: string; email: string } | null) {
 
 let linking: Promise<void> | null = null
 
-// Nach der Anmeldung: Familie des Kontos erfragen (löst dabei eine Einladung für die Gmail-Adresse ein)
+// Nach der Google-Anmeldung: Familie des Kontos erfragen. Einladungen werden nur angezeigt.
 export function linkSession(): Promise<void> {
   if (linking) return linking
   const p = (async () => {
@@ -236,11 +327,13 @@ export function linkSession(): Promise<void> {
       const r = await rpc<{ family_id: string | null }>('bc_session', {})
       if (state.auth !== 'signed_in') return
       if (r.family_id) {
-        adopt(r.family_id)
-        await refresh()
+        await adopt(r.family_id, 'google')
+      } else if (state.family || state.pull) {
+        // Konto ohne Familie, aber hier liegt Stand: nicht löschen, Eltern-Hinweis (Bodo C2/C4, Lotte D1)
+        set({ access: state.family ? 'no_family' : state.access })
+        const invites = await rpc<MyInvite[]>('bc_my_invites', {}).catch(() => [] as MyInvite[])
+        set({ needsFamily: true, invites: Array.isArray(invites) ? invites : [] })
       } else {
-        // Konto hat (nicht mehr) eine Familie: gespeicherten Stand nicht weiter zeigen
-        if (state.family) wipe()
         // Einladungen nur anzeigen; angenommen wird erst nach sichtbarer Rückfrage (acceptInvite)
         const invites = await rpc<MyInvite[]>('bc_my_invites', {}).catch(() => [] as MyInvite[])
         if (state.auth !== 'signed_in') return
@@ -258,11 +351,74 @@ export function linkSession(): Promise<void> {
   return p
 }
 
+// Kinder-Gerät: beim Start und bei Rückkehr ins Netz melden (Familie prüfen, zuletzt aktiv)
+export async function deviceHello() {
+  if (!state.device) return
+  try {
+    const r = await rpc<{ family_id: string }>('bc_device_hello', {})
+    if (!state.family) await adopt(r.family_id, 'device')
+    else if (r.family_id !== state.family) set({ access: 'revoked' })
+    else {
+      if (state.access !== 'ok') set({ access: 'ok' })
+      await refresh()
+    }
+  } catch (e) {
+    const a = accessFromError(e)
+    if (a) set({ access: a })
+    else if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
+  }
+}
+
+// Kinder-Gerät koppeln: Einmal-Code vom Eltern-Gerät einlösen. Liefert null bei Erfolg, sonst Fehlercode.
+export async function pairDevice(code: string): Promise<string | null> {
+  const prev = state.device
+  // Ohne altes Token einlösen (der Server braucht keins); ein widerrufenes würde nur stören
+  set({ device: null })
+  let r: { ok: boolean; error?: string; device_token?: string; family_id?: string }
+  try {
+    r = await rpc('bc_pair_redeem', { p_pair_code: code })
+  } catch (e) {
+    set({ device: prev })
+    throw e
+  }
+  if (!r.ok || !r.device_token || !r.family_id) {
+    set({ device: prev })
+    return r.error ?? 'pair_invalid'
+  }
+  await adopt(r.family_id, 'device', r.device_token)
+  if (state.conflict) set({ device: prev })
+  return null
+}
+
+// Altgerät: Familien-Code einmalig gegen ein Geräte-Token tauschen (nur bis 008). Scheitert es endgültig,
+// zeigt das Kinder-Gerät den Hinweis „Gerät neu verbinden“, Stand und Schlange bleiben.
+export async function exchangeLegacyCode() {
+  const code = read<string | null>(K.legacyCode, null)
+  if (!code || state.device) return
+  try {
+    const r = await rpc<{ ok: boolean; error?: string; device_token?: string; family_id?: string }>(
+      'bc_device_from_code', { p_code: code, p_name: null })
+    if (r.ok && r.device_token && r.family_id) {
+      await adopt(r.family_id, 'device', r.device_token)
+      return
+    }
+    if (r.error === 'pair_invalid') write(K.legacyCode, null)
+    set({ access: 'revoked', legacy: false })
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
+    else {
+      // 008 eingespielt (missing_function): Code ist wertlos. Andere Fehler: Code behalten, später erneut
+      // versuchen. In beiden Fällen können die Eltern neu koppeln; Stand und Schlange bleiben.
+      if (e instanceof ApiError && e.code === 'missing_function') write(K.legacyCode, null)
+      set({ access: 'revoked', legacy: false })
+    }
+  }
+}
+
 // Einladung in eine bestehende Familie annehmen (nach Tipp auf „Annehmen“) oder ablehnen
 export async function acceptInvite(familyId: string) {
   const r = await rpc<{ family_id: string }>('bc_invite_accept', { p_family_id: familyId })
-  adopt(r.family_id)
-  await refresh()
+  await adopt(r.family_id, 'google')
 }
 
 export async function declineInvite(familyId: string) {
@@ -273,16 +429,40 @@ export async function declineInvite(familyId: string) {
 // Erste Einrichtung: das angemeldete Konto bekommt eine neue Familie mit erstem Kind und Eltern-PIN
 export async function createFamily(childName: string, pin: string) {
   const r = await rpc<{ family_id: string; profile_id: string }>('bc_family_create', { p_child_name: childName, p_pin: pin })
-  adopt(r.family_id)
-  set({ profileId: r.profile_id })
-  await refresh()
+  await adopt(r.family_id, 'google')
+  if (!state.conflict) set({ profileId: r.profile_id })
 }
 
-// Nach dem Abmelden (auth.ts): mit wipeData alles Familiäre löschen, sonst bleibt der Stand für die
-// nächste Anmeldung mit demselben Konto (wartende Antworten werden dann gesendet)
+// Nach dem Abmelden bzw. Trennen: mit wipeData alles Familiäre löschen (nach Rückfrage), sonst bleibt der
+// Stand für die nächste Verbindung mit derselben Familie (wartende Antworten werden dann gesendet)
 export function forgetDevice(wipeData: boolean) {
   set({ parent: null, needsFamily: false })
   if (wipeData) wipe()
+}
+
+// Kinder-Gerät trennt sich selbst (Token auf dem Server ungültig, falls online)
+export async function leaveDevice(wipeData: boolean) {
+  if (state.device) await Promise.race([rpc('bc_device_leave', {}).catch(() => undefined), new Promise((r) => setTimeout(r, 3000))])
+  set({ device: null, parent: null })
+  if (wipeData) wipe()
+  else if (state.family) set({ access: 'revoked' })
+}
+
+// Zurück im Netz bzw. beim Start: je nach Gerät melden, Code tauschen oder abgleichen
+export async function reconnect() {
+  try {
+    if (state.device) await deviceHello()
+    else if (read<string | null>(K.legacyCode, null)) await exchangeLegacyCode()
+    else if (state.auth === 'signed_in' && (!state.family || !state.pull)) await linkSession()
+    else await refresh()
+  } catch {
+    // Fehler zeigt die jeweilige Ansicht; hier nichts verlieren
+  }
+}
+
+// Eltern löschen den Stand bewusst (Hinweis-Ansicht, roter Knopf)
+export function wipeLocal() {
+  wipe()
 }
 
 export function selectProfile(id: string) {
@@ -293,23 +473,19 @@ export function selectProfile(id: string) {
 
 export async function refresh() {
   const family = state.family
-  if (!family || state.auth === 'signed_out') return
+  if (!online()) return
   try {
     await flush()
     const pull = await rpc<Pull>('bc_pull', { p_token: token() })
     // Während des Ladens abgemeldet oder andere Familie: Ergebnis verwerfen (Siggi N1)
-    if (state.family !== family || (state.auth as AuthStatus) === 'signed_out') return
+    if (state.family !== family || !online()) return
     if (pull.family_id && pull.family_id !== family) return
     applyPull(pull)
   } catch (e) {
-    if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
-    // Konto gehört keiner Familie mehr (z. B. von den anderen Eltern entfernt)
-    else if (e instanceof ApiError && e.code === 'no_family') {
-      if (state.family === family) {
-        wipe()
-        set({ needsFamily: state.auth === 'signed_in' })
-      }
-    } else throw e
+    const a = accessFromError(e)
+    if (a) set({ access: a })
+    else if (e instanceof ApiError && e.code === 'offline') set({ offline: true })
+    else throw e
   }
 }
 
@@ -379,7 +555,7 @@ export function flush(): Promise<void> {
     await Promise.resolve()
     set({ syncing: true })
     try {
-      while (state.family && state.auth !== 'signed_out' && state.queue.length) {
+      while (online() && state.queue.length) {
         const item = state.queue[0]
         try {
           if (item.kind === 'answer') {
@@ -401,8 +577,13 @@ export function flush(): Promise<void> {
             set({ queue: state.queue.filter((q) => q !== item) })
             continue
           }
-          // Ohne Sitzung oder Familie bleibt die Antwort liegen, bis das Gerät wieder angemeldet ist
-          if (e instanceof ApiError && ['offline', 'server_error', 'retry', 'not_signed_in', 'no_family', 'missing_function'].includes(e.code)) {
+          // Ohne Zugang (abgelaufen, Gerät entfernt, Familie weg) bleibt die Antwort liegen (Bodo C1/C2)
+          const a = accessFromError(e)
+          if (a) {
+            set({ access: a })
+            return
+          }
+          if (e instanceof ApiError && ['offline', 'server_error', 'retry', 'not_signed_in', 'missing_function'].includes(e.code)) {
             set({ offline: e.code === 'offline' })
             return
           }
@@ -491,6 +672,28 @@ export async function deleteInvite(email: string) {
 
 export async function removeParent(userId: string) {
   await parentRpc('bc_parent_remove', { p_user_id: userId })
+}
+
+// ---------- Kinder-Geräte (nur Eltern-Gerät mit Google + PIN) ----------
+
+export interface DeviceRow {
+  id: string
+  name: string
+  created_at: string
+  last_seen_at: string | null
+  revoked_at: string | null
+}
+
+export function loadDevices() {
+  return parentRpc<DeviceRow[]>('bc_devices', {})
+}
+
+export function createPairCode(name: string) {
+  return parentRpc<{ code: string; expires_at: string }>('bc_pair_create', { p_name: name.trim().slice(0, 40) })
+}
+
+export async function revokeDevice(id: string) {
+  await parentRpc('bc_device_revoke', { p_device_id: id })
 }
 
 export async function setQuestionStatus(ids: string[], status: 'entwurf' | 'freigegeben') {
@@ -641,10 +844,12 @@ export function mastery(s: State, examId: string) {
 
 // Bei Rückkehr ins Netz und beim Start abgleichen
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => void refresh().catch(() => undefined))
+  window.addEventListener('online', () => void reconnect())
   // Zurück in die App (z. B. am nächsten Morgen): neu abgleichen, damit Tagesstand und Sterne stimmen (Bodo)
   document.addEventListener?.('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.family) void refresh().catch(() => undefined)
   })
-  // Der erste Abgleich startet, sobald auth.ts die Sitzung kennt (authChanged → linkSession → refresh)
+  // Kinder-Gerät meldet sich selbst; Altgerät tauscht seinen Code. Eltern-Gerät: erster Abgleich, sobald
+  // auth.ts die Sitzung kennt (authChanged → linkSession → refresh)
+  if (state.device || legacyCode) void reconnect()
 }

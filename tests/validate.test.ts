@@ -442,7 +442,8 @@ Deno.test("Abgleich mit 3000 Zufallsmutationen: bereinigte Frage ⇒ Datenbank n
 
 Deno.test("Folienverweis zeigt nach verworfenen Folien auf dieselbe Folie (Spickzettel)", () => {
   const f = (t: string) => ({ title: t, content: "Inhalt " + t, keywords: [] });
-  const q = (slide: unknown) => ({ ...clone(GOOD.multiple_choice), prompt: "Frage " + String(slide) + "?", slide });
+  // Eindeutige Fragetexte (q(2) und q("2") sonst gleich und als Duplikat verworfen; Bodo C9)
+  const q = (slide: unknown) => ({ ...clone(GOOD.multiple_choice), prompt: "Frage " + String(slide) + (typeof slide === "string" ? " als Text" : "") + "?", slide });
   // Folie 1 ist kaputt und fällt weg: aus 2 wird 1, aus 3 wird 2; Verweis auf die kaputte Folie entfällt
   const out = clean({ summary_slides: [f("A"), { title: "" }, f("C"), f("D")], questions: [q(0), q(1), q(2), q(3), q(4), q(-1), q(1.5), q("2")] });
   eq(out.summary_slides.map((s) => s.title), ["A", "C", "D"], "kaputte Folie verworfen");

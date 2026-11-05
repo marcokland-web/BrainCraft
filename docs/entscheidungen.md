@@ -96,3 +96,13 @@
 - 008 erst nach Auslieferung und Neuanmeldung aller Geräte: alte `p_code`-Funktionen, `bc_create`, `bc_invite_create`, Tabelle `invites`, Spalte `code_hash` entfernen; Aufräum-Zeitplan ohne `invites`.
 - Abmelden nur im Eltern-Cockpit: „Abmelden und Daten löschen“ (rot) oder „Nur abmelden“ (Stand und wartende Antworten bleiben für die nächste Anmeldung).
 - Bekanntes Risiko (Siggi-Lektion „Ein Kind meldet sich nie mit dem Konto der Eltern an“): Auf dem Kinder-iPad liegt jetzt eine Google-Sitzung eines Elternteils. Sie gilt für das ganze Supabase-Projekt (auch Zählerstände, Gewohnheiten) und liegt im gemeinsamen localStorage von marcokland-web.github.io. BrainCraft gibt damit nur Kinderrechte; Eltern-Aktionen brauchen die PIN. Andere Apps nutzen eigene Speicherschlüssel und zeigen ohne eigene Anmeldung nichts an, ein Skript auf demselben Origin könnte das Token aber lesen. Abhilfe auf Dauer: eigene Domain je App oder eigenes Google-Konto nur für das Kinder-Gerät ohne Rechte in anderen Apps.
+
+## 05.11.2026 – Kinder-Geräte werden gekoppelt (Nachbesserung nach Siggi, Bodo, Lern-Lotte)
+- Marco: Auf Kinder-Geräten keine Google-Sitzung (Siggi: eine Eltern-Sitzung gäbe vollen Zugriff auf Marcos Konto im geteilten Projekt und hinterließe das Google-Cookie in Safari). Kinder-Geräte werden vom Eltern-Gerät gekoppelt: Einmal-Code (10 Zeichen ohne verwechselbare Zeichen) und QR-Link, 10 Minuten, einmal einlösbar; Fehlversuche gebremst (5 je IP, 50 insgesamt je 15 Minuten). Das Gerät bekommt ein zufälliges Token (32 Byte), auf dem Server nur als SHA-256 (`braincraft.devices`).
+- Token im Header `x-bc-device` statt als Parameter: keine neuen Signaturen für alle Kinder-Funktionen, Token nicht im Anfrage-Körper; CORS erlaubt den Header (geprüft). Kinder- und PIN-Funktionen dürfen anon (mit Token) aufrufen; Konto-Funktionen (Eltern, Einladungen, Geräte koppeln/entfernen, Familie anlegen) nur mit Google.
+- Altgeräte tauschen den Familien-Code einmalig gegen ein Geräte-Token (`bc_device_from_code`, gleiche Bremse, fällt mit 008 weg); danach neu koppeln.
+- Zugang verloren: nie still löschen, Runde/Boss zu Ende spielen, dann Kinderansicht „Gleich geht's weiter, {Name}!“; Eltern-Bedienung erst nach „Ich bin Mama oder Papa“. Fremde Familie: Rückfrage mit rotem Knopf, nichts wird gesendet.
+- Einladungen zählen nur mit der von Google bestätigten Adresse (`auth.identities`, provider google, email_verified).
+- „Kein Zugang“ nur bei signup_disabled oder der Meldung des Hooks; flow_state_expired/bad_code_verifier → „Die Anmeldung ist abgelaufen“.
+- Abmelden: höchstens 3 s Netz, offline sofort lokal; zusätzlich „Auf allen Geräten abmelden“.
+- Das Risiko vom 03.11. (Eltern-Sitzung auf dem Kinder-iPad) entfällt damit.

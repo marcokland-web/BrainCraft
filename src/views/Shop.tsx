@@ -66,7 +66,8 @@ export function Shop({ demo }: { demo: boolean }) {
         return
       }
       setError(
-        code === 'offline' ? t.errOffline
+        // Kindgerecht (Lotte): Sterne bleiben, kein Druck
+        code === 'offline' ? t.shopOffline
           : code === 'not_enough_stars' ? t.errStars
           : code === 'reward_not_found' ? t.errReward
           : code === 'limit_reached' ? t.errVoucherLimit
