@@ -17,7 +17,11 @@ export function Sheet({ open, onClose, label, children }: {
   useEffect(() => {
     const d = ref.current
     if (!d) return
-    if (open && !d.open) d.showModal()
+    if (open && !d.open) {
+      d.showModal()
+      // Startfokus bei Rückfragen nie auf dem roten Knopf: Ansicht markiert den sicheren Knopf
+      d.querySelector<HTMLElement>('[data-autofocus]')?.focus()
+    }
     if (!open && d.open) d.close()
   })
 

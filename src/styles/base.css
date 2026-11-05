@@ -193,7 +193,7 @@ main{display:grid;gap:18px}
 .home .demo-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:14px 16px;grid-column:1 / -1}
 .home .demo-banner .btn{min-height:44px}
 /* Knopf auf Inhaltskarte: deckende Tönung statt Glas (Glas auf Weiß war unsichtbar) */
-.parents .approve-acts .btn.tinted,.home .demo-banner .btn.tinted,.parents .family .btn.tinted{background:var(--tint);border-color:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
+.parents .approve-acts .btn.tinted,.home .demo-banner .btn.tinted,.parents .family .btn.tinted,.parents .devices .btn.tinted,.reconnect .card .btn.tinted{background:var(--tint);border-color:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
 
 /* Einrichten */
 .setup .setup-hero{display:grid;justify-items:center;text-align:center;gap:8px}
@@ -265,7 +265,7 @@ main{display:grid;gap:18px}
 .parents .approve-acts{display:flex;gap:6px}
 .parents .approve-acts .btn{min-height:44px;padding:0 14px;font-size:15px}
 .parents .scan-help p{margin:0 0 6px}
-.parents .danger-row .tx b{color:var(--bad)}
+.parents .danger-row .tx b,.reconnect .danger-row .tx b{color:var(--bad)}
 dialog.confirm{width:min(400px,calc(100vw - 32px));margin:auto;border-radius:22px}
 dialog.confirm .st{padding-top:20px}
 dialog.confirm p{margin:6px 4px 14px}

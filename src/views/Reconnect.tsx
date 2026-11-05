@@ -83,7 +83,7 @@ export function Reconnect() {
         <p>{t.wipeLocalAsk(pending)}</p>
         <div className="setup-acts">
           <button type="button" className="btn danger wide" onClick={() => { setAskWipe(false); wipeLocal() }}>{t.wipeLocalBtn}</button>
-          <button type="button" className="btn plain wide" onClick={() => setAskWipe(false)}>{t.cancel}</button>
+          <button type="button" className="btn plain wide" data-autofocus onClick={() => setAskWipe(false)}>{t.cancel}</button>
         </div>
       </Sheet>
     </section>

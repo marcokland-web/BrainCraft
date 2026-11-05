@@ -160,7 +160,7 @@ export function Devices() {
             {error && <p className="setup-err" role="alert">{error}</p>}
             <div className="setup-acts">
               <button type="button" className="btn danger wide" disabled={busy} onClick={() => void remove(ask)}>{t.deviceRemove}</button>
-              <button type="button" className="btn plain wide" disabled={busy} onClick={() => setAsk(null)}>{t.cancel}</button>
+              <button type="button" className="btn plain wide" data-autofocus disabled={busy} onClick={() => setAsk(null)}>{t.cancel}</button>
             </div>
           </>
         )}
