@@ -14,7 +14,7 @@ const csp: Plugin = {
   transformIndexHtml: (html) =>
     html.replace(
       '<!--csp-->',
-      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://*.googleusercontent.com; media-src 'self' data: blob:; connect-src 'self' ${SUPABASE}; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">`,
+      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://lh3.googleusercontent.com; media-src 'self' data: blob:; connect-src 'self' ${SUPABASE}; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">`,
     ),
 }
 

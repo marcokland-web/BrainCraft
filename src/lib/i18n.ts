@@ -219,7 +219,7 @@ const de = {
   pairInvalid: 'Dieser Code passt nicht oder ist abgelaufen. Lass dir einen neuen geben.',
   pairBlocked: 'Zu viele Versuche. Bitte in 15 Minuten noch einmal.',
   pairFromLink: 'Code aus dem QR-Code übernommen. Tippe auf „Verbinden“.',
-  kidWaitTitle: (name: string) => (name ? `Gleich geht's weiter, ${name}!` : "Gleich geht's weiter!"),
+  kidWaitTitle: (name: string) => (name ? `Gleich geht’s weiter, ${name}!` : 'Gleich geht’s weiter!'),
   kidWaitText: 'Deine Sterne und Antworten sind sicher gespeichert. Hol kurz Mama oder Papa.',
   iAmParent: 'Ich bin Mama oder Papa',
   parentHelpRevoked: 'Dieses Gerät ist nicht mehr mit eurer Familie verbunden (zum Beispiel im Eltern-Cockpit entfernt). Gib einen neuen Code vom Eltern-Gerät ein.',

@@ -450,3 +450,6 @@ dialog.confirm .st-grab{display:none}
 /* Rückfragen mit langen Adressen sprengen die Breite nicht (iPhone) */
 dialog.confirm,dialog.confirm .st{min-width:0;max-width:calc(100vw - 32px)}
 dialog.confirm p{overflow-wrap:anywhere}
+/* Koppeln-Sheet: Überschrift; Platzhalter im Code-Feld dünner und heller (Doris N1/N3) */
+dialog.confirm .sheet-title{margin:2px 4px 4px;font-size:20px}
+.pair-form .pair-input::placeholder{font-weight:400;color:var(--muted);opacity:.55;letter-spacing:.06em}

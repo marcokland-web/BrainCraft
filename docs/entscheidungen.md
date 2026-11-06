@@ -106,3 +106,10 @@
 - „Kein Zugang“ nur bei signup_disabled oder der Meldung des Hooks; flow_state_expired/bad_code_verifier → „Die Anmeldung ist abgelaufen“.
 - Abmelden: höchstens 3 s Netz, offline sofort lokal; zusätzlich „Auf allen Geräten abmelden“.
 - Das Risiko vom 03.11. (Eltern-Sitzung auf dem Kinder-iPad) entfällt damit.
+
+## 06.11.2026 – Letzte Nachbesserung vor der Freigabe (Siggi, Doris)
+- Bremse beim Koppeln: IP aus cf-connecting-ip, sonst letzter Eintrag von x-forwarded-for; globale Grenze 200 Fehlversuche je 15 Minuten (ein Fremder sperrt das Koppeln nicht für alle).
+- Geräte: höchstens 30 neue je Familie in 30 Tagen (widerrufene zählen mit), Tausch aus Familien-Code höchstens 5 je Familie und Tag; widerrufene Geräte nach 90 Tagen gelöscht (Zeitplan in 008).
+- Verworfene Kopplung (fremde Familie, „Abbrechen“) macht das neue Token sofort ungültig; nach erfolgreicher Kopplung wird eine noch vorhandene Google-Sitzung auf dem Gerät entfernt.
+- CSP: Bilder nur von lh3.googleusercontent.com zusätzlich (Profilfoto), Verbindungen nur zur App und zu Supabase.
+- Kinderansicht öffnet den Eltern-Bereich nur von selbst, wenn das Gerät in dieser Sitzung gerade von Google zurückkommt; Startfokus in Rückfragen auf „Abbrechen“.

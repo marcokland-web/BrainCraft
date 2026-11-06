@@ -244,7 +244,7 @@ export function Setup({ onDemo }: { onDemo: () => void }) {
         {error && <p className="setup-err" role="alert">{error}</p>}
         <div className="setup-acts">
           <button type="button" className="btn danger wide" disabled={busy} onClick={() => askDecline && void decline(askDecline)}>{t.inviteDecline}</button>
-          <button type="button" className="btn plain wide" disabled={busy} onClick={() => setAskDecline(null)}>{t.cancel}</button>
+          <button type="button" className="btn plain wide" data-autofocus disabled={busy} onClick={() => setAskDecline(null)}>{t.cancel}</button>
         </div>
       </Sheet>
     </section>

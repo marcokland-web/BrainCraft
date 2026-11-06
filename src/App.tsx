@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Settings } from './components/Settings'
+import { takeGoogleReturn } from './lib/auth'
 import { Gear, Logo, Star, TabGear, TabLearn, TabShop, TabStart } from './components/Icons'
 import { unlockAudio } from './lib/audio'
 import { DEMO_EXAM, DEMO_QUESTIONS, DEMO_SLIDES } from './lib/demo'
@@ -77,6 +78,12 @@ export function App() {
   // aber erst nach einer laufenden Runde bzw. einem Boss-Kampf (Bodo C1, Lotte D2). Stand bleibt.
   const needsReconnect = (!!s.pull || s.legacy) && s.access !== 'ok'
   const playDemo = demo && !s.family && !s.pull && !s.legacy
+
+  // Rückkehr von Google gilt nur für die Ansicht direkt danach: Ist das Gerät verbunden, Merker verwerfen,
+  // damit eine spätere Kinderansicht den Eltern-Bereich nicht von selbst öffnet (Doris M1)
+  useEffect(() => {
+    if (connected && !needsReconnect && !s.conflict) takeGoogleReturn()
+  }, [connected, needsReconnect, s.conflict])
   const stars = connected ? (currentProfile(s)?.stars_balance ?? 0) : 0
 
   // iOS: Ton erst nach der ersten Berührung erlaubt

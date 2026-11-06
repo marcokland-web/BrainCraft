@@ -125,6 +125,7 @@ export function Devices() {
       </div>
 
       <Sheet open={pairOpen} onClose={() => { if (!busy) { setPairOpen(false); setCode(null); void reload() } }} label={t.devicePair}>
+        <h2 className="sheet-title">{t.devicePair}</h2>
         {!code ? (
           <form className="pair-create" onSubmit={(e) => { e.preventDefault(); void create() }}>
             <label className="field">

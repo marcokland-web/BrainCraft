@@ -42,6 +42,7 @@ select cron.schedule('braincraft-aufraeumen', '17 3 * * *', $c$
   delete from braincraft.parent_invites where expires_at < now();
   delete from braincraft.pair_codes where expires_at < now() - interval '1 day';
   delete from braincraft.pair_attempts where at < now() - interval '1 day';
+  delete from braincraft.devices where revoked_at < now() - interval '90 days';
 $c$);
 
 drop table if exists braincraft.invites;

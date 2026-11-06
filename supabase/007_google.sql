@@ -93,9 +93,12 @@ create table if not exists braincraft.devices (
   token_hash   text not null unique check (token_hash ~ '^[0-9a-f]{64}$'),
   created_at   timestamptz not null default now(),
   last_seen_at timestamptz,
-  revoked_at   timestamptz
+  revoked_at   timestamptz,
+  -- true = aus einem früheren Familien-Code getauscht (Altgerät; Bremse 5 je Familie und Tag)
+  via_code     boolean not null default false
 );
 create index if not exists devices_family_idx on braincraft.devices (family_id);
+alter table braincraft.devices add column if not exists via_code boolean not null default false;
 
 -- Einmal-Codes zum Koppeln (nur Hash, 10 Minuten, einmal)
 create table if not exists braincraft.pair_codes (
@@ -218,31 +221,48 @@ begin
 end $$;
 
 -- IP der Anfrage (erster Eintrag von x-forwarded-for) für die Bremse beim Koppeln
+-- Zuerst cf-connecting-ip (von Cloudflare gesetzt, nicht fälschbar); sonst der LETZTE Eintrag von
+-- x-forwarded-for (den hängt der eigene Proxy an, die vorderen kann der Absender selbst schreiben; Siggi M1)
 create or replace function braincraft.request_ip()
 returns text language sql stable set search_path = '' as $$
-  select left(btrim(split_part(coalesce(nullif(current_setting('request.headers', true), '')::json->>'x-forwarded-for', ''), ',', 1)), 64);
+  with h as (select coalesce(nullif(current_setting('request.headers', true), ''), '{}')::json as j)
+  select left(coalesce(
+           nullif(btrim(j->>'cf-connecting-ip'), ''),
+           btrim(reverse(split_part(reverse(coalesce(j->>'x-forwarded-for', '')), ',', 1)))), 64)
+    from h;
 $$;
 
--- Bremse: true, wenn diese IP oder alle zusammen zu viele Fehlversuche hatten (15 Minuten)
+-- Bremse: true, wenn diese IP (5) oder alle zusammen (200) zu viele Fehlversuche hatten (15 Minuten);
+-- die hohe globale Grenze verhindert, dass ein Fremder das Koppeln für alle sperrt (Siggi M1)
 create or replace function braincraft.pair_blocked()
 returns boolean language sql stable security definer set search_path = '' as $$
   select (select count(*) from braincraft.pair_attempts
            where not ok and ip = braincraft.request_ip() and at > now() - interval '15 minutes') >= 5
       or (select count(*) from braincraft.pair_attempts
-           where not ok and at > now() - interval '15 minutes') >= 50;
+           where not ok and at > now() - interval '15 minutes') >= 200;
 $$;
 
--- Neues Geräte-Token (32 Byte zufällig) für eine Familie anlegen; höchstens 10 aktive Geräte je Familie
-create or replace function braincraft.device_create(p_family uuid, p_name text)
+-- Ältere Fassung mit zwei Parametern (frühere Probeläufe) entfernen, sonst bliebe eine Überladung
+drop function if exists braincraft.device_create(uuid, text);
+
+-- Neues Geräte-Token (32 Byte zufällig) für eine Familie anlegen. Grenzen (Siggi N1): höchstens 10 aktive
+-- Geräte und höchstens 30 neue in 30 Tagen je Familie (widerrufene zählen mit); Tausch aus Familien-Code
+-- (p_via_code) höchstens 5 je Familie und Tag. Familie gesperrt, damit parallele Aufrufe nicht überholen.
+create or replace function braincraft.device_create(p_family uuid, p_name text, p_via_code boolean default false)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare v_tok text := encode(extensions.gen_random_bytes(32), 'hex'); v_id uuid;
 begin
-  if (select count(*) from braincraft.devices where family_id = p_family and revoked_at is null) >= 10 then
+  perform 1 from braincraft.families where id = p_family for update;
+  if (select count(*) from braincraft.devices where family_id = p_family and revoked_at is null) >= 10
+     or (select count(*) from braincraft.devices
+          where family_id = p_family and created_at > now() - interval '30 days') >= 30
+     or (coalesce(p_via_code, false) and (select count(*) from braincraft.devices
+          where family_id = p_family and via_code and created_at > now() - interval '24 hours') >= 5) then
     raise exception 'limit_reached';
   end if;
-  insert into braincraft.devices (family_id, name, token_hash, last_seen_at)
+  insert into braincraft.devices (family_id, name, token_hash, last_seen_at, via_code)
   values (p_family, left(coalesce(nullif(btrim(p_name), ''), 'Kinder-Gerät'), 40),
-          encode(extensions.digest(v_tok, 'sha256'), 'hex'), now())
+          encode(extensions.digest(v_tok, 'sha256'), 'hex'), now(), coalesce(p_via_code, false))
   returning id into v_id;
   return jsonb_build_object('ok', true, 'device_token', v_tok, 'device_id', v_id, 'family_id', p_family);
 end $$;
@@ -481,7 +501,7 @@ begin
     return jsonb_build_object('ok', false, 'error', 'pair_invalid');
   end if;
   insert into braincraft.pair_attempts (ip, ok) values (braincraft.request_ip(), true);
-  return braincraft.device_create(f, coalesce(nullif(btrim(p_name), ''), 'Altes Gerät'));
+  return braincraft.device_create(f, coalesce(nullif(btrim(p_name), ''), 'Altes Gerät'), true);
 exception when others then raise exception using message = braincraft.err_code(sqlstate, sqlerrm);
 end $$;
 

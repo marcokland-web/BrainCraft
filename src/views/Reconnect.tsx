@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { AccountRow } from '../components/Account'
 import { Logo } from '../components/Icons'
 import { Sheet } from '../components/Sheet'
-import { signOutDevice, useAuth } from '../lib/auth'
+import { signOutDevice, takeGoogleReturn, useAuth } from '../lib/auth'
 import { useT } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
 import { resolveConflict, useStore, wipeLocal } from '../lib/store'
@@ -17,9 +17,9 @@ export function Reconnect() {
   const s = useStore()
   const auth = useAuth()
   const { name } = usePrefs()
-  const [parentTapped, setParent] = useState(false)
-  // Gerade mit Google zurückgekommen (Konto ohne Familie): Eltern-Bereich gleich offen lassen
-  const parent = parentTapped || (!!auth.user && s.needsFamily)
+  // Eltern-Bereich nur von selbst offen, wenn das Gerät in dieser Sitzung gerade von Google zurückkommt
+  // (Merker beim Tipp auf den Google-Knopf); sonst erst nach „Ich bin Mama oder Papa“ (Doris M1)
+  const [parent, setParent] = useState(takeGoogleReturn)
   const [askWipe, setAskWipe] = useState(false)
   const pending = s.queue.filter((q) => q.kind !== 'seen').length
 

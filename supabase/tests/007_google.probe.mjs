@@ -259,6 +259,38 @@ const OLD = r.rows?.[0].x.device_token
 ok('Altgerät: Familien-Code -> Geräte-Token derselben Familie', /^[0-9a-f]{64}$/.test(OLD ?? '') && r.rows[0].x.family_id === FAM, r.error ?? JSON.stringify(r.rows))
 r = await as('anon', null, `select public.bc_pull(p_token => null) ->> 'family_id' as x`, [], { 'x-bc-device': OLD })
 ok('Altgerät mit Geräte-Token: Stand derselben Familie', r.rows && r.rows[0].x === FAM, r.error)
+// IP für die Bremse: cf-connecting-ip vor dem LETZTEN x-forwarded-for-Eintrag (Siggi M1)
+const ipOf = async (h) => (await as('anon', null, `select braincraft.request_ip() as x`, [], h).catch(() => null))
+r = await db.query(`select set_config('request.headers', $1, false) as a`, [JSON.stringify({ 'x-forwarded-for': '1.1.1.1, 2.2.2.2, 3.3.3.3' })])
+let ip = (await db.query(`select braincraft.request_ip() as x`)).rows[0].x
+ok('request_ip: letzter Eintrag von x-forwarded-for (vordere fälschbar)', ip === '3.3.3.3', ip)
+await db.query(`select set_config('request.headers', $1, false)`, [JSON.stringify({ 'x-forwarded-for': '1.1.1.1, 3.3.3.3', 'cf-connecting-ip': '9.9.9.9' })])
+ip = (await db.query(`select braincraft.request_ip() as x`)).rows[0].x
+ok('request_ip: cf-connecting-ip hat Vorrang', ip === '9.9.9.9', ip)
+await db.query(`select set_config('request.headers', '', false)`)
+void ipOf
+// Globale Bremse erst bei 200 Fehlversuchen (ein Fremder sperrt nicht alle)
+await db.exec(`delete from braincraft.pair_attempts; insert into braincraft.pair_attempts (ip, ok) select 'x' || g, false from generate_series(1, 199) g`)
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => 'AAAAA-AAAAA') as x`, [], { 'x-forwarded-for': '203.0.113.50' })
+ok('globale Bremse: 199 Fehlversuche anderer IPs sperren noch nicht', r.rows && r.rows[0].x.error === 'pair_invalid', JSON.stringify(r.rows ?? r.error))
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => 'AAAAA-AAAAA') as x`, [], { 'x-forwarded-for': '203.0.113.51' })
+ok('globale Bremse: ab 200 gesperrt', r.rows && r.rows[0].x.error === 'pair_blocked', JSON.stringify(r.rows ?? r.error))
+await db.exec(`delete from braincraft.pair_attempts`)
+// Altgerät-Tausch: höchstens 5 je Familie und Tag (Siggi N1)
+const swaps = []
+for (let i = 0; i < 5; i++) swaps.push(await as('anon', null, `select public.bc_device_from_code(p_code => $1) ->> 'ok' as x`, [CODE], { 'x-forwarded-for': '192.0.2.' + (20 + i) }))
+r = await as('anon', null, `select public.bc_device_from_code(p_code => $1) as x`, [CODE], { 'x-forwarded-for': '192.0.2.40' })
+ok('Altgerät-Tausch: 6. am selben Tag -> limit_reached (schon 1 vorher)', swaps.filter((x) => x.rows?.[0].x === 'true').length === 4 && r.error === 'limit_reached', JSON.stringify([swaps.map((x) => x.rows?.[0].x ?? x.error), r.error]))
+// Geräte: höchstens 30 neue in 30 Tagen je Familie, widerrufene zählen mit
+await db.exec(`update braincraft.devices set revoked_at = now() where family_id = '${FAM}';
+  insert into braincraft.devices (family_id, name, token_hash, revoked_at)
+  select '${FAM}', 'alt' || g, encode(extensions.digest('t' || g, 'sha256'), 'hex'), now()
+    from generate_series(1, 30 - (select count(*)::int from braincraft.devices where family_id = '${FAM}')) g`)
+r = await as('authenticated', MARCO, `select public.bc_pair_create(p_token => $1, p_name => 'Noch eins') as x`, [TOK2])
+const PAIR2 = r.rows?.[0].x.code
+r = await as('anon', null, `select public.bc_pair_redeem(p_pair_code => $1) as x`, [PAIR2], { 'x-forwarded-for': '198.51.100.9' })
+ok('Geräte: 31. Gerät in 30 Tagen (alle widerrufen) -> limit_reached', r.error === 'limit_reached', JSON.stringify(r.rows ?? r.error))
+
 // email_norm in SQL und JS gleich
 const SAMPLES = ['  Zweit.Eltern+x@GoogleMail.com ', 'a' + String.fromCodePoint(0x200B) + 'b@gmail.com', 'x' + String.fromCodePoint(0x1680) + 'y' + String.fromCodePoint(0x2007) + '@Example.ORG',
   'Ü.Ber@Example.de', 'a' + String.fromCodePoint(0x85) + String.fromCodePoint(0x3000) + 'b@x.de', String.fromCodePoint(0xFEFF) + 'MIXED.Case+tag@gmail.com', 'ohne-at', 'two@@x.de', 'tab\tz@x.de']

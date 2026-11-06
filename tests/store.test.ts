@@ -500,6 +500,34 @@ test('Koppeln mit Code einer anderen Familie: Rückfrage, nichts gesendet; Best�
   handler = defaultHandler
 })
 
+test('Kopplung verworfen: neues Token wird mit bc_device_leave ungültig; erfolgreiche Kopplung meldet Google ab', async () => {
+  const OTHER = 'f0000000-0000-4000-8000-000000000002'
+  const NEW = 'e'.repeat(64)
+  handler = (fn, args) => {
+    if (fn === 'bc_pair_redeem') return json({ ok: true, device_token: NEW, family_id: OTHER })
+    if (fn === 'bc_pull') return json(fakePull({ family_id: OTHER }))
+    if (fn === 'bc_device_leave') return json(true)
+    return defaultHandler(fn, args)
+  }
+  const s = await freshStore({ 'braincraft:device': DEV, 'braincraft:family': FAM, 'braincraft:access': 'revoked', 'braincraft:profile': KID, 'braincraft:pull': fakePull() })
+  let googleOut = 0
+  s.setGoogleSignOut(async () => { googleOut++ })
+  await tick(10)
+  await s.pairDevice('ABCDE-FGHJK')
+  assert.equal(googleOut, 0, 'bei Rückfrage noch nicht abmelden')
+  calls = []
+  await s.resolveConflict(false)
+  await tick(5)
+  const leave = calls.find((c) => c.fn === 'bc_device_leave')!
+  assert.equal(leave.headers['x-bc-device'], NEW, 'mit dem verworfenen Token')
+  assert.equal(JSON.parse(mem.get('braincraft:device')!), DEV, 'altes Token bleibt')
+  // Kopplung derselben Familie: danach Google-Sitzung entfernen
+  handler = (fn, args) => (fn === 'bc_pair_redeem' ? json({ ok: true, device_token: NEW, family_id: FAM }) : defaultHandler(fn, args))
+  assert.equal(await s.pairDevice('ABCDE-FGHJK'), null)
+  assert.equal(googleOut, 1)
+  handler = defaultHandler
+})
+
 test('Google: anderes Konto mit anderer Familie -> Rückfrage statt still löschen; Abbrechen behält', async () => {
   const OTHER = 'f0000000-0000-4000-8000-000000000002'
   handler = (fn, args) => (fn === 'bc_session' ? json({ family_id: OTHER }) : defaultHandler(fn, args))

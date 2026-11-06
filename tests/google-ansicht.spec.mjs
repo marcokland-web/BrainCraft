@@ -410,7 +410,7 @@ for (const lang of ['de', 'en']) {
     const srv = makeServer(); srv.family = null
     srv.authHook = (route) => route.request().url().includes('grant_type=pkce') ? route.fulfill({ status: 500, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: '{"code":500,"error_code":"unexpected_failure","msg":"x"}' }) : null
     const { ctx, page } = await open({ srv, lang })
-    await googleBtn(page, lang).click()
+    await googleBtn(page, lang).click({ noWaitAfter: true })
     await wait(1500)
     const a = await page.locator('[role=alert]').first().innerText().catch(() => '')
     ok(`Anmeldung Fehler 500 beim Code-Tausch ${lang}: Studio-Text`, a === (lang === 'en' ? "Sign-in didn't work. Please try again." : 'Anmelden hat nicht geklappt. Versuch es noch einmal.'), `„${a}“`)
@@ -421,7 +421,7 @@ for (const lang of ['de', 'en']) {
   {
     const srv = makeServer(); srv.family = null
     const { ctx, page } = await open({ srv, lang })
-    await googleBtn(page, lang).click()
+    await googleBtn(page, lang).click({ noWaitAfter: true })
     await page.locator('form.setup-form').waitFor({ timeout: 5000 })
     await sweep(page, 'familie-anlegen')
     await ctx.close()
@@ -431,7 +431,7 @@ for (const lang of ['de', 'en']) {
     const srv = makeServer(); srv.family = null
     srv.myInvites = [{ family_id: FAMILY, invited_by: 'grossmutter.mit.langem.namen@googlemail.com', created_at: later, expires_at: later }]
     const { ctx, page } = await open({ srv, lang })
-    await googleBtn(page, lang).click()
+    await googleBtn(page, lang).click({ noWaitAfter: true })
     await page.locator('.setup-invite').waitFor({ timeout: 5000 })
     await sweep(page, 'einladung')
     await page.locator('.setup-invite').getByRole('button', { name: lang === 'en' ? 'Decline' : 'Ablehnen' }).click()

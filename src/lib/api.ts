@@ -28,10 +28,11 @@ export class ApiError extends Error {
   }
 }
 
-export async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+// opts.deviceToken: einmalig mit einem anderen Geräte-Token senden (z. B. verworfene Kopplung abmelden)
+export async function rpc<T>(fn: string, args: Record<string, unknown>, opts: { deviceToken?: string } = {}): Promise<T> {
   let res: Response
   const headers: Record<string, string> = { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' }
-  const device = deviceSource()
+  const device = opts.deviceToken ?? deviceSource()
   if (device) headers['x-bc-device'] = device
   else {
     const access = await tokenSource()

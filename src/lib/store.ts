@@ -293,6 +293,8 @@ export async function resolveConflict(takeNew: boolean) {
   const c = state.conflict
   if (!c) return
   if (!takeNew) {
+    // Verworfene Kopplung: das neue Token auf dem Server gleich wieder ungültig machen (Siggi N2)
+    if (c.deviceToken) void rpc('bc_device_leave', {}, { deviceToken: c.deviceToken }).catch(() => undefined)
     // Neue Verbindung verwerfen; ohne gültigen Zugang zeigt das Gerät danach „neu verbinden“
     set({ conflict: null, ...(c.source === 'google' || !state.device ? { access: state.pull ? ('expired' as Access) : 'ok' } : {}) })
     return
@@ -369,6 +371,13 @@ export async function deviceHello() {
   }
 }
 
+// Nach erfolgreicher Kopplung eine evtl. noch vorhandene Google-Sitzung auf diesem Gerät entfernen (Siggi):
+// main.tsx setzt die Funktion (auth.ts), damit store.ts ohne Auth-Bibliothek testbar bleibt
+let signOutGoogle: () => Promise<void> = async () => undefined
+export function setGoogleSignOut(fn: () => Promise<void>) {
+  signOutGoogle = fn
+}
+
 // Kinder-Gerät koppeln: Einmal-Code vom Eltern-Gerät einlösen. Liefert null bei Erfolg, sonst Fehlercode.
 export async function pairDevice(code: string): Promise<string | null> {
   const prev = state.device
@@ -387,6 +396,7 @@ export async function pairDevice(code: string): Promise<string | null> {
   }
   await adopt(r.family_id, 'device', r.device_token)
   if (state.conflict) set({ device: prev })
+  else await signOutGoogle().catch(() => undefined)
   return null
 }
 

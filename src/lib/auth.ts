@@ -26,6 +26,16 @@ export interface AuthState {
 }
 
 const STORAGE_KEY = 'braincraft-auth'
+const RETURN_KEY = 'braincraft:google-return'
+
+// Kommt die Seite gerade von Google zurück (Merker beim Tipp gesetzt UND Rückleitung mit ?code=/error=)?
+// Gilt nur kurz nach dem Start und nur einmal (Doris M1); sonst öffnet erst „Ich bin Mama oder Papa“.
+let returnedAt = 0
+export function takeGoogleReturn(): boolean {
+  const on = returnedAt > 0 && Date.now() - returnedAt < 60_000
+  returnedAt = 0
+  return on
+}
 
 let client: GoTrueClient | null = null
 let state: AuthState = { ready: false, user: null, error: null, redirecting: false }
@@ -77,7 +87,7 @@ function toUser(u: RawUser | null | undefined): AuthUser | null {
     email: u.email ?? '',
     name: str(m.full_name) ?? str(m.name),
     // Nur Google-Profilbilder über https (die CSP erlaubt nur diese Quelle)
-    avatar: avatar && /^https:\/\/[a-z0-9-]+\.googleusercontent\.com\//.test(avatar) ? avatar : undefined,
+    avatar: avatar && avatar.startsWith('https://lh3.googleusercontent.com/') ? avatar : undefined,
   }
 }
 
@@ -151,6 +161,12 @@ export function initAuth(onChange: (user: AuthUser | null) => void) {
   })
   // Mit ?code= zurück von Google: Ergebnis des Tauschs auswerten, sonst stünde man still am Anfang (Bodo C3)
   const hadCode = params.has('code')
+  try {
+    if (sessionStorage.getItem(RETURN_KEY) === '1' && (hadCode || !!urlError)) returnedAt = Date.now()
+    sessionStorage.removeItem(RETURN_KEY)
+  } catch {
+    // Privater Modus
+  }
   void (async () => {
     let initError: { code?: string; message?: string } | null = null
     let retryable = false
@@ -187,6 +203,12 @@ export function initAuth(onChange: (user: AuthUser | null) => void) {
 export async function signInWithGoogle(): Promise<void> {
   if (!client) throw new Error('auth_not_ready')
   set({ error: null, redirecting: true })
+  // Merker für die Rückkehr: Nur dann öffnet die Kinderansicht den Eltern-Bereich von selbst (Doris M1)
+  try {
+    sessionStorage.setItem(RETURN_KEY, '1')
+  } catch {
+    // Privater Modus: Eltern tippen dann eben „Ich bin Mama oder Papa“
+  }
   const { error } = await client.signInWithOAuth({
     provider: 'google',
     options: { redirectTo: redirectUrl(), queryParams: { prompt: 'select_account' } },

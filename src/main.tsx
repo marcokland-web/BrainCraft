@@ -2,8 +2,8 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import './lib/prefs'
-import { initAuth } from './lib/auth'
-import { authChanged } from './lib/store'
+import { initAuth, signOutDevice } from './lib/auth'
+import { authChanged, setGoogleSignOut } from './lib/store'
 import { takePairCodeFromUrl } from './views/Connect'
 import './styles/base.css'
 import './styles/glass.css'
@@ -15,6 +15,8 @@ takePairCodeFromUrl()
 
 // Google-Sitzung des Geräts laden (löst nach der Rückkehr von Google auch den ?code= ein)
 initAuth(authChanged)
+// Kinder-Gerät nach der Kopplung ohne Google-Sitzung (nur dieses Gerät)
+setGoogleSignOut(() => signOutDevice('local'))
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

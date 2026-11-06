@@ -186,7 +186,11 @@ export function Parents({ onClose }: { onClose: () => void }) {
   }, [unlocked, onClose])
 
   useEffect(() => {
-    if (askSignOut) dialog.current?.showModal()
+    // Startfokus auf „Abbrechen“, nicht auf dem roten Knopf (Doris N6)
+    if (askSignOut) {
+      dialog.current?.showModal()
+      dialog.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
+    }
     else dialog.current?.close()
   }, [askSignOut])
 
@@ -341,7 +345,7 @@ export function Parents({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn danger wide" disabled={busy} onClick={() => void signOut(true)}>{s.device ? t.deviceLeaveWipe : t.signOutWipe}</button>
             <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false)}>{s.device ? t.deviceLeaveKeep : t.signOutKeep}</button>
             {!s.device && <button type="button" className="btn tinted wide" disabled={busy} onClick={() => void signOut(false, 'global')}>{t.signOutEverywhere}</button>}
-            <button type="button" className="btn plain wide" disabled={busy} onClick={() => setAskSignOut(false)}>{t.cancel}</button>
+            <button type="button" className="btn plain wide" data-autofocus disabled={busy} onClick={() => setAskSignOut(false)}>{t.cancel}</button>
           </div>
         </div>
       </dialog>
